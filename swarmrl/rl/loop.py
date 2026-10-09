@@ -14,40 +14,19 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
 
 import numpy as np
 
+from swarmrl.inference.weight_sync import WeightSync
+from swarmrl.observability import MetricsSink
 from swarmrl.rl.advantages import grpo_advantages
 from swarmrl.rl.curriculum import Curriculum, measure_solve_rates
 from swarmrl.rl.loss import alignment_shift, entropy_from_logprobs, importance_weights, mismatch_kl
-from swarmrl.rl.packing import PackedSample, pack_episodes
+from swarmrl.rl.packing import pack_episodes
 from swarmrl.rl.schedule import StageConfig
+from swarmrl.rl.trainer import Trainer
 from swarmrl.swarm.dispatcher import Dispatcher, EpisodeRequest
 from swarmrl.traces.schema import Episode
-
-
-class Trainer(Protocol):
-    def logprobs(self, samples: Sequence[PackedSample]) -> list[np.ndarray]:
-        """Per sample, log p(input_ids[i]) for every position (aligned with rollout_logprobs)."""
-
-    def update(
-        self,
-        samples: Sequence[PackedSample],
-        advantages: list[np.ndarray],
-        old_logprobs: list[np.ndarray],
-        is_weights: list[np.ndarray],
-        masks: list[np.ndarray],
-        stage: StageConfig,
-    ) -> dict: ...
-
-    def save(self, version: int) -> str: ...
-
-
-class WeightSync(Protocol):
-    def before_training(self) -> None: ...
-
-    def sync(self, checkpoint_path: str, version: int) -> None: ...
 
 
 @dataclass
@@ -62,7 +41,7 @@ class RLLoop:
     max_len: int | None = None
     eval_every: int | None = None
     eval_fn: Callable[[int], dict] | None = None
-    log: Callable[[dict], None] = print
+    log: Callable[[dict], None] = field(default_factory=MetricsSink)
     checkpoint: str | None = None
     version: int = 0
     history: list[dict] = field(default_factory=list)
@@ -97,12 +76,16 @@ class RLLoop:
         shift = alignment_shift(old_all, roll_all, m_all) if m_all.size else 0
 
         weights, eff_masks = [], []
-        for o, r, m in zip(old, roll, masks):
+        for o, r, m in zip(old, roll, masks, strict=True):
             w, em = importance_weights(o, r, m, self.stage.off_policy)
             weights.append(w)
             eff_masks.append(em)
-        advs = [np.full(len(s.input_ids), s.advantage) * m for s, m in zip(samples, masks)]
-        upd = self.trainer.update(samples, advs, old, weights, eff_masks, self.stage)
+        # Score everything (mismatch KL needs it), but only train on samples that carry signal:
+        # a zero advantage (all-equal group) contributes no gradient, only compute.
+        keep = [i for i, s in enumerate(samples) if s.advantage != 0.0]
+        pick = lambda xs: [xs[i] for i in keep]  # noqa: E731
+        advs = [np.full(len(samples[i].input_ids), samples[i].advantage) * masks[i] for i in keep]
+        upd = self.trainer.update(pick(samples), advs, pick(old), pick(weights), pick(eff_masks), self.stage)
 
         self.version += 1
         self.checkpoint = self.trainer.save(self.version)
@@ -121,6 +104,7 @@ class RLLoop:
             "all_zero_groups": adv_stats.all_zero,
             "all_one_groups": adv_stats.all_one,
             "samples": len(samples),
+            "train_samples": len(keep),
             "policy_tokens": int(m_all.sum()),
             "mismatch_kl": kl,
             "alignment_shift": shift,

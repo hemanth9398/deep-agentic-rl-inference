@@ -59,6 +59,7 @@ class HarborTask:
     docker_image: str | None = None
     build_timeout_s: float = 600.0
     verifier_timeout_s: float = 600.0
+    agent_timeout_s: float = 1800.0  # wall clock for one whole episode
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -95,12 +96,13 @@ class HarborTask:
         return h.hexdigest()
 
     @classmethod
-    def load(cls, task_dir: str | os.PathLike[str]) -> "HarborTask":
+    def load(cls, task_dir: str | os.PathLike[str]) -> HarborTask:
         d = Path(task_dir).resolve()
         cfg = tomllib.loads((d / "task.toml").read_text())
         meta = dict(cfg.get("metadata", {}))
         env = cfg.get("environment", {})
         ver = cfg.get("verifier", {})
+        agent = cfg.get("agent", {})
         split = meta.get("split", "train")
         if split not in SPLITS:
             raise ValueError(f"{d.name}: unknown split {split!r}")
@@ -116,6 +118,7 @@ class HarborTask:
             docker_image=env.get("docker_image"),
             build_timeout_s=float(env.get("build_timeout_sec", 600.0)),
             verifier_timeout_s=float(ver.get("timeout_sec", 600.0)),
+            agent_timeout_s=float(agent.get("timeout_sec", 1800.0)),
             metadata=meta,
         )
 

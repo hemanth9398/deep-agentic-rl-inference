@@ -65,13 +65,20 @@ def tester_ran_tests_after_last_edit(ep: Episode, tester_roles: tuple[str, ...] 
 
 def reviewer_verdict(ep: Episode) -> str | None:
     for t in reversed(ep.transitions):
-        if t.role == "reviewer" and t.tool_call and t.error_kind is None and t.tool_call["name"] in ("accept", "send_back"):
+        if (
+            t.role == "reviewer"
+            and t.tool_call
+            and t.error_kind is None
+            and t.tool_call["name"] in ("accept", "send_back")
+        ):
             return t.tool_call["name"]
     return None
 
 
 def handoffs(ep: Episode) -> int:
-    return sum(1 for t in ep.transitions if t.tool_call and t.error_kind is None and t.tool_call["name"] in HANDOFF_TOOLS)
+    return sum(
+        1 for t in ep.transitions if t.tool_call and t.error_kind is None and t.tool_call["name"] in HANDOFF_TOOLS
+    )
 
 
 # --- failure taxonomy -----------------------------------------------------------------
@@ -100,7 +107,8 @@ def classify_failure(ep: Episode, oracle_files: Sequence[str] | None = None) -> 
     if not ep.final_diff.strip():
         return "max_turns" if ep.termination is not Termination.SUBMIT else "no_change"
     if any(t.role == "tester" for t in ep.transitions) and not any(
-        t.role == "tester" and (_ran_tests(t) or (t.tool_call and t.tool_call["name"] == "bash")) for t in ep.transitions
+        t.role == "tester" and (_ran_tests(t) or (t.tool_call and t.tool_call["name"] == "bash"))
+        for t in ep.transitions
     ):
         return "bug_never_reproduced"
     if reviewer_verdict(ep) == "accept":

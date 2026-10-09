@@ -51,15 +51,21 @@ def test_hack_attempt_zeroes_reward(make_runner, task):
             return call("delegate", to="coder", plan="edit")
         if role == "coder":
             return [
-                call("str_replace", path="stats/core.py", old="    return sum(values) / len(values)",
-                     new="    return sum(values) / len(values) if values else 0.0"),
+                call(
+                    "str_replace",
+                    path="stats/core.py",
+                    old="    return sum(values) / len(values)",
+                    new="    return sum(values) / len(values) if values else 0.0",
+                ),
                 call("str_replace", path="tests/test_core.py", old="x", new="y"),  # refused by the tool
                 call("handoff", to="tester", note="done"),
             ][turn]
         if role == "tester":
             # bash can still write to tests: the grader drops it and zeroes the reward
-            return [call("bash", command="echo 'def test_x(): pass' > tests/test_extra.py"),
-                    call("handoff", to="reviewer", note="ok")][turn]
+            return [
+                call("bash", command="echo 'def test_x(): pass' > tests/test_extra.py"),
+                call("handoff", to="reviewer", note="ok"),
+            ][turn]
         return call("accept")
 
     ep = asyncio.run(make_runner(script).run(task))
@@ -77,7 +83,11 @@ def test_three_format_errors_end_episode(make_runner, task):
 
 
 def test_corrective_observation_then_recovery(make_runner, task):
-    replies = ["<tool_call>{bad json</tool_call>", call("view", path="stats/core.py"), call("delegate", to="coder", plan="x")]
+    replies = [
+        "<tool_call>{bad json</tool_call>",
+        call("view", path="stats/core.py"),
+        call("delegate", to="coder", plan="x"),
+    ]
 
     def script(role, turn, ctx):
         if role == "planner":
@@ -132,3 +142,43 @@ def test_dispatcher_streams_to_store(make_runner, task, factory, tmp_path):
     assert len(store.index()) == 3
     back = store.get(eps[0].episode_id)
     assert isinstance(back, Episode) and back.to_dict() == eps[0].to_dict()
+
+
+class _FlakyPolicy:
+    """Raises a non-infra bug for one episode, sleeps forever for another, delegates otherwise."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.seen: dict[str, int] = {}
+
+    async def generate(self, input_ids, sampling, stop_ids, session_key, max_new_tokens):
+        ep = session_key.split(":")[0]
+        idx = self.seen.setdefault(ep, len(self.seen))
+        if idx == 0:
+            raise RuntimeError("bug in a tool parser")
+        if idx == 1:
+            await asyncio.sleep(3600)
+        return await self.inner.generate(input_ids, sampling, stop_ids, session_key, max_new_tokens)
+
+
+def test_batch_survives_internal_errors_and_timeouts(make_runner, task, factory):
+    from swarmrl.swarm.dispatcher import DispatchLimits
+
+    runner = _oracle_runner(make_runner, task, factory)
+    runner.policy = _FlakyPolicy(runner.policy)
+    d = Dispatcher(runner, DispatchLimits(episode_timeout_s=10))
+    eps = d.run_sync([EpisodeRequest(task, s) for s in range(4)])
+    by_err = [e.metadata.get("infra_error", "ok") for e in eps]
+    assert sum(e.resolved for e in eps) == 2
+    assert any("RuntimeError" in x for x in by_err) and any("wall clock" in x for x in by_err)
+    bug = next(e for e in eps if "RuntimeError" in e.metadata.get("infra_error", ""))
+    assert bug.metadata["internal_error"] is True and not bug.scored
+
+
+def test_invalid_task_is_never_graded(make_runner, task, factory, record):
+    from dataclasses import replace
+
+    runner = _oracle_runner(make_runner, task, factory)
+    runner.validation = lambda t: replace(record, valid=False, reason="no failing test")
+    ep = asyncio.run(runner.run(task))
+    assert ep.termination is Termination.INFRA_ERROR and "failed validation" in ep.metadata["infra_error"]

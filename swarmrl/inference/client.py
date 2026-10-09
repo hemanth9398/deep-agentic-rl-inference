@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import hashlib
 import json
@@ -11,7 +12,6 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 from swarmrl.sandbox.base import InfraError
 from swarmrl.swarm.config import SamplingConfig
@@ -25,10 +25,15 @@ class Generation:
     latency_s: float = 0.0
 
 
-class PolicyClient(Protocol):
+class PolicyClient(abc.ABC):
+    """Token-in, token-out generation. Implementations must return the sampled ids and their
+    log-probs exactly as the sampler produced them (never decoded and re-encoded)."""
+
+    @abc.abstractmethod
     async def generate(
         self, input_ids: list[int], sampling: SamplingConfig, stop_ids: list[int], session_key: str, max_new_tokens: int
-    ) -> Generation: ...
+    ) -> Generation:
+        """`session_key` is "<episode_id>:<role>"; servers use it for sticky routing."""
 
 
 class StickyRouter:
@@ -55,7 +60,7 @@ def _post(url: str, payload: dict, timeout: float) -> dict:
         return json.loads(resp.read())
 
 
-class SGLangClient:
+class SGLangClient(PolicyClient):
     """Native SGLang /generate with input_ids and return_logprob (no chat endpoint, no detokenize round trip)."""
 
     def __init__(
@@ -119,7 +124,7 @@ class SGLangClient:
         return await asyncio.to_thread(self._generate_sync, input_ids, sampling, stop_ids, session_key, max_new_tokens)
 
 
-class ScriptedPolicy:
+class ScriptedPolicy(PolicyClient):
     """Test/dry-run policy. `script(role, role_turn, context_text) -> reply text` decides each turn.
 
     Returns plausible log-probs so the full data path (traces, packing, losses) can be exercised

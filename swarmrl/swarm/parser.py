@@ -33,7 +33,9 @@ class ParseError:
 def parse_tool_call(text: str, allowed: tuple[str, ...]) -> ParsedCall | ParseError:
     m = _CALL.search(text)
     if not m:
-        return ParseError(ErrorKind.NO_TOOL_CALL, "No tool call found. End your reply with one <tool_call>{...}</tool_call>.")
+        return ParseError(
+            ErrorKind.NO_TOOL_CALL, "No tool call found. End your reply with one <tool_call>{...}</tool_call>."
+        )
     body = m.group(1)
     try:
         obj = json.loads(body)

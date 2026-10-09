@@ -91,7 +91,8 @@ def _view(ctx: ToolContext, a: dict) -> ToolOutcome:
 def _search(ctx: ToolContext, a: dict) -> ToolOutcome:
     path = a.get("path", ".")
     r = ctx.sandbox.exec(
-        f"grep -rnI --exclude-dir=.git --exclude-dir=.swarmrl -e {shlex.quote(a['pattern'])} -- {shlex.quote(path)} | head -50"
+        "grep -rnI --exclude-dir=.git --exclude-dir=.swarmrl "
+        f"-e {shlex.quote(a['pattern'])} -- {shlex.quote(path)} | head -50"
     )
     return ToolOutcome(r.stdout or "No matches.")
 
@@ -117,7 +118,7 @@ def _create_file(ctx: ToolContext, a: dict) -> ToolOutcome:
     path = a["path"]
     if is_protected(path, ctx.config.protected_paths):
         return _fail(f"{path} is a protected test/config path; edits there are discarded and zero the reward.")
-    exists = ctx.sandbox.exec(f"test -e {shlex.quote(path)}").returncode == 0
+    exists = ctx.sandbox.exists(path)
     if exists and not a.get("overwrite", False):
         return _fail(f"{path} exists. Use str_replace, or pass overwrite=true.")
     ctx.sandbox.write_file(path, a["content"])

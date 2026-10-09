@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from swarmrl.grading.pytest_runner import run_pytest
-from swarmrl.sandbox.base import SandboxFactory, apply_diff
+from swarmrl.sandbox.base import SandboxFactory
 
 
 @dataclass
@@ -53,7 +53,7 @@ class TaskValidator:
         sb = self.factory.create(task)
         try:
             if patch is not None:
-                r = apply_diff(sb, patch)
+                r = sb.apply_patch(patch)
                 if r.returncode != 0:
                     return None, f"oracle patch does not apply: {r.output[-500:]}"
             sb.copy_in(task.test_overlay_dir)

@@ -11,12 +11,13 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
-# Thin adapters import these lazily; pin them per the doc's "verify before building" list.
-sglang = ["sglang>=0.5"]
-sft = ["torch", "transformers", "trl", "peft", "bitsandbytes", "datasets"]
-rl = ["torch", "skyrl"]
-verifiers = ["verifiers"]
+dev = ["pytest>=8", "ruff>=0.6"]
+# Heavy dependencies are imported lazily, only by the modules that need them.
+sglang = ["sglang>=0.5"]                                    # serving (the client itself is stdlib-only)
+train = ["torch>=2.4", "transformers>=4.56", "peft>=0.13", "safetensors"]   # RL trainer, LoRA SFT, merge
+qlora = ["swarmrl[train]", "bitsandbytes>=0.43"]            # 4-bit QLoRA SFT (CUDA)
+skyrl = ["skyrl"]                                           # multi-GPU RL via SkyRL-train
+verifiers = ["verifiers"]                                   # eval path B (vf-eval)
 
 [project.scripts]
 swarmrl = "swarmrl.cli:main"
@@ -26,3 +27,14 @@ include = ["swarmrl*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF100"]
+ignore = ["B008"]  # frozen dataclass defaults in signatures are intentional
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

@@ -35,7 +35,9 @@ class AdaptiveSampler:
                 continue
             n = min(self.per_round, self.max_attempts - self.attempts[t.task_id])
             base = self.attempts[t.task_id]
-            reqs += [EpisodeRequest(t, seed=base + i, split=t.split, group_id=f"rs{round_idx}:{t.task_id}") for i in range(n)]
+            reqs += [
+                EpisodeRequest(t, seed=base + i, split=t.split, group_id=f"rs{round_idx}:{t.task_id}") for i in range(n)
+            ]
         return reqs
 
     def record(self, episodes: Sequence[Episode]) -> None:
@@ -46,10 +48,18 @@ class AdaptiveSampler:
             self.successes[e.task_id] += int(e.resolved and e.submitted)
 
     def solve_rates(self) -> dict[str, float]:
-        return {t.task_id: self.successes[t.task_id] / self.attempts[t.task_id] for t in self.tasks if self.attempts[t.task_id]}
+        return {
+            t.task_id: self.successes[t.task_id] / self.attempts[t.task_id]
+            for t in self.tasks
+            if self.attempts[t.task_id]
+        }
 
     def never_solved(self) -> list[str]:
-        return [t.task_id for t in self.tasks if self.attempts[t.task_id] >= self.max_attempts and not self.successes[t.task_id]]
+        return [
+            t.task_id
+            for t in self.tasks
+            if self.attempts[t.task_id] >= self.max_attempts and not self.successes[t.task_id]
+        ]
 
 
 def run_rejection_sampling(dispatcher: Dispatcher, sampler: AdaptiveSampler, max_rounds: int = 32) -> list[Episode]:

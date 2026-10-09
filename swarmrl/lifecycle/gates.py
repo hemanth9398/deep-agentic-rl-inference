@@ -78,7 +78,9 @@ def _plateau(xs: Sequence[float], window: int, tol: float) -> bool:
     return abs(b - a) <= tol
 
 
-def gate_rl1(train_rewards: Sequence[float], heldout: dict, prev_heldout: dict, window: int = 10, tol: float = 0.01) -> GateResult:
+def gate_rl1(
+    train_rewards: Sequence[float], heldout: dict, prev_heldout: dict, window: int = 10, tol: float = 0.01
+) -> GateResult:
     reasons = []
     if not _plateau(train_rewards, window, tol):
         reasons.append("train reward has not plateaued")

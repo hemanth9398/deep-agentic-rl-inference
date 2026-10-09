@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 
-from swarmrl.sandbox.base import SandboxFactory, apply_diff
 from swarmrl.grading.protected import changed_paths
+from swarmrl.sandbox.base import SandboxFactory
 
 
 def oracle_file_states(task, factory: SandboxFactory) -> dict[str, str | None]:
@@ -19,7 +19,7 @@ def oracle_file_states(task, factory: SandboxFactory) -> dict[str, str | None]:
     paths = changed_paths(task.oracle_patch)
     sb = factory.create(task)
     try:
-        r = apply_diff(sb, task.oracle_patch)
+        r = sb.apply_patch(task.oracle_patch)
         if r.returncode != 0:
             raise ValueError(f"oracle patch does not apply: {r.output}")
         out: dict[str, str | None] = {}
@@ -69,12 +69,9 @@ def oracle_script(files: dict[str, str | None], config):
     return script
 
 
-async def run_oracle_agent(task, runner_factory, factory: SandboxFactory):
-    """runner_factory(policy) -> EpisodeRunner wired to the real tools, grader and validation."""
+async def run_oracle_agent(task, make_runner, factory: SandboxFactory, config, chat):
+    """make_runner(policy) -> EpisodeRunner wired to the real tools, grader and validation for `config`."""
     from swarmrl.inference.client import ScriptedPolicy
 
-    files = oracle_file_states(task, factory)
-    probe = runner_factory(None)
-    policy = ScriptedPolicy(probe.chat, oracle_script(files, probe.cfg))
-    runner = runner_factory(policy)
-    return await runner.run(task, seed=0)
+    policy = ScriptedPolicy(chat, oracle_script(oracle_file_states(task, factory), config))
+    return await make_runner(policy).run(task, seed=0)

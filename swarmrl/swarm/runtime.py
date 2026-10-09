@@ -8,6 +8,8 @@ server returned.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import time
 import traceback
 import uuid
@@ -18,13 +20,15 @@ from swarmrl.grading.grader import CleanRoomGrader
 from swarmrl.grading.reward import RubricTerm, total_reward
 from swarmrl.inference.chat import ChatFormat
 from swarmrl.inference.client import PolicyClient
-from swarmrl.sandbox.base import InfraError, Sandbox, SandboxFactory, extract_diff
+from swarmrl.sandbox.base import InfraError, Sandbox, SandboxFactory
 from swarmrl.swarm.config import SwarmConfig
 from swarmrl.swarm.harness import Harness
 from swarmrl.swarm.parser import ParseError, parse_tool_call
 from swarmrl.swarm.tools import ToolContext, ToolOutcome, describe_tools, execute
 from swarmrl.tasks.validate import ValidationRecord
 from swarmrl.traces.schema import AgentSpan, Episode, ErrorKind, GradeSummary, Termination, Transition
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,6 +41,7 @@ class EpisodeState:
     role_turns: dict[str, int] = field(default_factory=dict)
     pending_return: dict[str, str] = field(default_factory=dict)
     t0: float = field(default_factory=time.monotonic)
+    abandoned: bool = False  # set when the episode was failed/cancelled; late resources are closed at once
 
 
 class EpisodeRunner:
@@ -91,7 +96,11 @@ class EpisodeRunner:
 
     def init_stage(self, st: EpisodeState) -> None:
         """CPU: start the task container, reset the repo, build the entry role's prompt."""
-        st.sandbox = self.factory.create(st.task)
+        sb = self.factory.create(st.task)
+        if st.abandoned:  # timed out while the container was starting
+            sb.close()
+            return
+        st.sandbox = sb
         st.harness = Harness(self.cfg)
         entry = self.cfg.entry_role
         st.contexts[entry] = self.chat.start(self._system(entry), self._first_user(st.task, None, ""))
@@ -137,11 +146,19 @@ class EpisodeRunner:
 
             ep.transitions.append(
                 Transition(
-                    episode_id=ep.episode_id, role=active, turn=len(ep.transitions), role_turn=role_turn,
-                    input_ids=list(ctx), output_ids=list(gen.output_ids), rollout_logprobs=list(gen.logprobs),
-                    tool_call=tool_call, observation=outcome.observation,
+                    episode_id=ep.episode_id,
+                    role=active,
+                    turn=len(ep.transitions),
+                    role_turn=role_turn,
+                    input_ids=list(ctx),
+                    output_ids=list(gen.output_ids),
+                    rollout_logprobs=list(gen.logprobs),
+                    tool_call=tool_call,
+                    observation=outcome.observation,
                     error_kind=outcome.error_kind.value if outcome.error_kind else None,
-                    latency_s=gen.latency_s, finish_reason=gen.finish_reason, closing_ids=closing,
+                    latency_s=gen.latency_s,
+                    finish_reason=gen.finish_reason,
+                    closing_ids=closing,
                 )  # fmt: skip
             )
             st.contexts[active] = ctx + list(gen.output_ids) + closing
@@ -195,12 +212,14 @@ class EpisodeRunner:
         ep = st.episode
         try:
             if st.sandbox is not None:
-                ep.final_diff = extract_diff(st.sandbox)
+                ep.final_diff = st.sandbox.diff()
         finally:
             self._close(st)
         if not ep.termination.scored:
             return
         record = self.validation(st.task)
+        if not record.valid:
+            raise InfraError(f"task {st.task.task_id} failed validation ({record.reason}); it must not be in any split")
         grade = self.grader.grade(st.task, ep.final_diff, record)
         ep.protected_edits = grade.protected_edits
         ep.grade = GradeSummary(
@@ -220,20 +239,53 @@ class EpisodeRunner:
             finally:
                 st.sandbox = None
 
-    def _infra_fail(self, st: EpisodeState, e: BaseException) -> None:
+    def _infra_fail(self, st: EpisodeState, e: BaseException, internal: bool = False) -> None:
+        st.abandoned = True
         st.episode.termination = Termination.INFRA_ERROR
         st.episode.team_reward = None
         st.episode.metadata["infra_error"] = "".join(traceback.format_exception_only(type(e), e)).strip()
+        if internal:
+            st.episode.metadata["internal_error"] = True  # a bug in our code, not the environment: page someone
         self._close(st)
 
-    async def run(self, task, seed: int = 0, split: str | None = None, group_id: str | None = None) -> Episode:
-        """All three stages back to back (the dispatcher interleaves them across episodes)."""
-        st = self.new_state(task, seed, split, group_id)
-        try:
-            await asyncio.to_thread(self.init_stage, st)
+    async def execute(
+        self,
+        st: EpisodeState,
+        timeout_s: float | None = None,
+        sems: tuple[asyncio.Semaphore, asyncio.Semaphore, asyncio.Semaphore] | None = None,
+    ) -> Episode:
+        """Run all three stages with failure isolation: whatever goes wrong, this returns an Episode.
+
+        sems = (init, in-flight, reward) pools from the Dispatcher; None runs unbounded.
+        """
+        init_sem, run_sem, reward_sem = sems or (contextlib.nullcontext(),) * 3
+
+        async def stages() -> None:
+            async with init_sem:
+                await asyncio.to_thread(self.init_stage, st)
             await self.run_stage(st)
-            await asyncio.to_thread(self.reward_stage, st)
-        except InfraError as e:
-            self._infra_fail(st, e)
+            async with reward_sem:
+                await asyncio.to_thread(self.reward_stage, st)
+
+        async with run_sem:  # the wall clock starts once the episode holds an in-flight slot
+            st.t0 = time.monotonic()
+            try:
+                await asyncio.wait_for(stages(), timeout_s)
+            except InfraError as e:
+                log.warning("episode %s (%s): infra error: %s", st.episode.episode_id, st.task.task_id, e)
+                self._infra_fail(st, e)
+            except TimeoutError:
+                log.warning(
+                    "episode %s (%s): wall-clock timeout %ss", st.episode.episode_id, st.task.task_id, timeout_s
+                )
+                self._infra_fail(st, TimeoutError(f"episode exceeded {timeout_s}s wall clock"))
+            except Exception as e:
+                log.exception("episode %s (%s): internal error", st.episode.episode_id, st.task.task_id)
+                self._infra_fail(st, e, internal=True)
         st.episode.wall_time_s = time.monotonic() - st.t0
         return st.episode
+
+    async def run(self, task, seed: int = 0, split: str | None = None, group_id: str | None = None,
+                  timeout_s: float | None = None) -> Episode:  # fmt: skip
+        """One episode, all stages back to back (the Dispatcher interleaves stages across episodes)."""
+        return await self.execute(self.new_state(task, seed, split, group_id), timeout_s or task.agent_timeout_s)

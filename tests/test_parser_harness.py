@@ -8,7 +8,10 @@ def test_parse_errors():
     tools = ("view", "delegate")
     assert parse_tool_call("hi", tools).kind is ErrorKind.NO_TOOL_CALL
     assert parse_tool_call("<tool_call>{nope</tool_call>", tools).kind is ErrorKind.BAD_JSON
-    assert parse_tool_call('<tool_call>{"name": "bash", "arguments": {}}</tool_call>', tools).kind is ErrorKind.UNKNOWN_TOOL
+    assert (
+        parse_tool_call('<tool_call>{"name": "bash", "arguments": {}}</tool_call>', tools).kind
+        is ErrorKind.UNKNOWN_TOOL
+    )
     assert parse_tool_call('<tool_call>{"name": "view", "arguments": []}</tool_call>', tools).kind is ErrorKind.BAD_ARGS
     ok = parse_tool_call('x <tool_call>{"name": "view", "arguments": {"path": "a"}}</tool_call>', tools)
     assert not isinstance(ok, ParseError) and ok.arguments == {"path": "a"}

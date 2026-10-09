@@ -10,13 +10,14 @@ saturates before GPU memory does.
 from __future__ import annotations
 
 import asyncio
-import time
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from swarmrl.sandbox.base import InfraError
 from swarmrl.swarm.runtime import EpisodeRunner
 from swarmrl.traces.schema import Episode
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class DispatchLimits:
     init_workers: int = 16
     max_in_flight: int = 256  # episodes in the run stage at once
     reward_workers: int = 16
+    episode_timeout_s: float | None = None  # None: each task's [agent] timeout_sec
 
 
 @dataclass(frozen=True)
@@ -46,22 +48,15 @@ class Dispatcher:
         self.on_episode = on_episode  # e.g. TraceStore.put: transitions stream to the store
 
     async def _one(self, req: EpisodeRequest, sems: tuple[asyncio.Semaphore, ...]) -> Episode:
-        init_sem, run_sem, reward_sem = sems
         r = self.runner
         st = r.new_state(req.task, req.seed, req.split, req.group_id)
-        try:
-            async with run_sem:  # bounds total in-flight episodes (and live containers)
-                async with init_sem:
-                    await asyncio.to_thread(r.init_stage, st)
-                await r.run_stage(st)
-                async with reward_sem:
-                    await asyncio.to_thread(r.reward_stage, st)
-        except InfraError as e:
-            r._infra_fail(st, e)
-        st.episode.wall_time_s = time.monotonic() - st.t0
+        ep = await r.execute(st, self.limits.episode_timeout_s or req.task.agent_timeout_s, sems)
         if self.on_episode:
-            await asyncio.to_thread(self.on_episode, st.episode)
-        return st.episode
+            try:
+                await asyncio.to_thread(self.on_episode, ep)
+            except Exception:
+                log.exception("on_episode failed for %s", ep.episode_id)
+        return ep
 
     async def run(self, requests: Sequence[EpisodeRequest]) -> list[Episode]:
         sems = (

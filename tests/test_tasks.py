@@ -1,11 +1,11 @@
+from conftest import EXAMPLE
+
 from swarmrl.grading.protected import filter_diff, is_protected
 from swarmrl.swarm.config import default_swarm_config
 from swarmrl.tasks.harbor import load_tasks
 from swarmrl.tasks.mutants import apply_mutation, find_mutations, generate_mutant_tasks
 from swarmrl.tasks.splits import assign_repo_splits, contamination
 from swarmrl.tasks.validate import TaskValidator, ValidationCache
-
-from conftest import EXAMPLE
 
 
 def test_example_task_validates(task, record):
@@ -46,7 +46,8 @@ def test_protected_paths():
     assert not is_protected("stats/core.py", pats)
     diff = (
         "diff --git a/stats/core.py b/stats/core.py\n--- a/stats/core.py\n+++ b/stats/core.py\n@@ -1 +1 @@\n-a\n+b\n"
-        "diff --git a/tests/test_core.py b/tests/test_core.py\n--- a/tests/test_core.py\n+++ b/tests/test_core.py\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/tests/test_core.py b/tests/test_core.py\n"
+        "--- a/tests/test_core.py\n+++ b/tests/test_core.py\n@@ -1 +1 @@\n-x\n+y\n"
     )
     kept, dropped = filter_diff(diff, pats)
     assert "stats/core.py" in kept and "tests/test_core.py" not in kept
@@ -78,8 +79,15 @@ def test_mutation_roundtrip():
 
 def test_generate_mutant_tasks_are_valid(tmp_path, factory):
     out = tmp_path / "mutants"
-    paths = generate_mutant_tasks(EXAMPLE / "environment" / "repo", "tests", ["tests/test_core.py"], out, "stats",
-                                  default_swarm_config(), max_tasks=2)
+    paths = generate_mutant_tasks(
+        EXAMPLE / "environment" / "repo",
+        "tests",
+        ["tests/test_core.py"],
+        out,
+        "stats",
+        default_swarm_config(),
+        max_tasks=2,
+    )
     assert paths
     v = TaskValidator(factory)
     for t in load_tasks(out):

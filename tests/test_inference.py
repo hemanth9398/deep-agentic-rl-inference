@@ -17,8 +17,13 @@ class FakeSGLang(BaseHTTPRequestHandler):
         FakeSGLang.calls.append((self.path, body))
         if self.path == "/generate":
             out = [10, 11, 258]  # ends with end-of-turn (ByteTokenizer id 258)
-            resp = {"output_ids": out, "meta_info": {
-                "output_token_logprobs": [[-0.1, i, None] for i in out], "finish_reason": {"type": "stop", "matched": 258}}}
+            resp = {
+                "output_ids": out,
+                "meta_info": {
+                    "output_token_logprobs": [[-0.1, i, None] for i in out],
+                    "finish_reason": {"type": "stop", "matched": 258},
+                },
+            }
         else:
             resp = {"success": True}
         data = json.dumps(resp).encode()
@@ -41,7 +46,9 @@ def test_sglang_client_token_in_token_out():
     srv, url = serve()
     try:
         chat = ChatFormat(ByteTokenizer())
-        g = asyncio.run(SGLangClient(url).generate([1, 2, 3], SamplingConfig(1.0, 1.0, 64), chat.stop_ids, "ep:coder", 64))
+        g = asyncio.run(
+            SGLangClient(url).generate([1, 2, 3], SamplingConfig(1.0, 1.0, 64), chat.stop_ids, "ep:coder", 64)
+        )
         assert g.output_ids == [10, 11, 258] and g.logprobs == [-0.1] * 3 and g.finish_reason == "stop"
         path, body = FakeSGLang.calls[-1]
         assert path == "/generate" and body["input_ids"] == [1, 2, 3] and body["return_logprob"] is True

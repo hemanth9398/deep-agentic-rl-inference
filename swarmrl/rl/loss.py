@@ -82,22 +82,28 @@ class LossOut:
     policy_tokens: float
 
 
+def clipped_pg_terms(logp_new, logp_old, advantages, clip_low=0.2, clip_high=0.28):
+    """Per-token clipped surrogate objective (to maximize) and a clipped indicator."""
+    xp, clip = _xp(logp_new)
+    ratio = xp.exp(logp_new - logp_old)
+    surr1 = ratio * advantages
+    surr2 = clip(ratio, 1.0 - clip_low, 1.0 + clip_high) * advantages
+    return xp.minimum(surr1, surr2), surr2 < surr1
+
+
 def clipped_pg_loss(logp_new, logp_old, advantages, mask, clip_low=0.2, clip_high=0.28, is_weights=None) -> LossOut:
     """PPO-style clipped surrogate with asymmetric clip (clip-higher), token-mean reduction, no KL term.
 
     advantages: [batch, seq] (the per-(episode, role) scalar broadcast over that role's tokens).
     """
-    xp, clip = _xp(logp_new)
-    ratio = xp.exp(logp_new - logp_old)
-    surr1 = ratio * advantages
-    surr2 = clip(ratio, 1.0 - clip_low, 1.0 + clip_high) * advantages
-    obj = xp.minimum(surr1, surr2)
+    obj, clipped = clipped_pg_terms(logp_new, logp_old, advantages, clip_low, clip_high)
     if is_weights is not None:
         obj = obj * is_weights
     loss = -masked_mean(obj, mask)
-    clipped = ((surr2 < surr1) * mask).sum() / max(float(mask.sum()), 1.0)
-    kl = masked_mean(logp_old - logp_new, mask)
-    return LossOut(loss, float(clipped), float(kl), float(mask.sum()))
+    n = float(mask.sum())
+    clipfrac = float((clipped * mask).sum()) / max(n, 1.0)
+    kl = float(masked_mean(logp_old - logp_new, mask))
+    return LossOut(loss, clipfrac, kl, n)
 
 
 def entropy_from_logprobs(logp_sampled, mask) -> float:

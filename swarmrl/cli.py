@@ -1,11 +1,18 @@
-"""swarmrl command line.
+"""swarmrl command line: one command per lifecycle stage.
 
-  swarmrl validate TASKS_DIR [--docker] [--oracle-agent]   validate tasks, cache F2P/P2P, run the oracle agent
-  swarmrl mutants REPO --tests DIR --targets ... --out OUT generate procedural-mutant tasks
-  swarmrl eval TASKS_DIR --split dev --server URL ...      eval path A through SGLang
-  swarmrl report TRACES [--split heldout] [--checkpoint C] metrics report from the trace store
-  swarmrl sft-data TRACES --out samples.jsonl ...          filter episodes -> transition-level SFT samples
-  swarmrl fingerprint                                       print the default swarm fingerprint
+  swarmrl validate TASKS [--oracle-agent]           validate tasks, cache F2P/P2P, oracle agent, contamination
+  swarmrl mutants REPO --tests D --targets ... --out generate procedural-mutant tasks
+  swarmrl eval TASKS --split dev --server URL ...   eval path A through the swarm and SGLang
+  swarmrl rejection-sample TASKS --server URL ...   adaptive rejection sampling; writes solve rates
+  swarmrl sft-data TRACES --out samples.jsonl       filter episodes -> transition-level SFT samples
+  swarmrl sft-train SAMPLES --base-model M --out D  QLoRA SFT                         (needs .[sft])
+  swarmrl merge --base-model M --adapter A --out D  merge a LoRA adapter in bf16       (needs .[sft])
+  swarmrl rl TASKS --server URL --model M ...       staged GRPO with the torch trainer (needs .[sft])
+  swarmrl report TRACES [--split S]                 metrics report from the trace store
+  swarmrl fingerprint [--single-agent]              print the swarm fingerprint
+
+Sandboxes: --sandbox local (dev only, no isolation) | docker | k8s [--namespace NS].
+Logging: SWARMRL_LOG_LEVEL, SWARMRL_LOG_JSON=1.
 """
 
 from __future__ import annotations
@@ -13,15 +20,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
+log = logging.getLogger("swarmrl.cli")
 
-def _factory(docker: bool):
-    if docker:
+
+# --- builders shared by commands --------------------------------------------------------
+
+
+def _factory(a):
+    kind = getattr(a, "sandbox", "local")
+    if kind == "docker":
         from swarmrl.sandbox.docker import DockerSandboxFactory
 
         return DockerSandboxFactory()
+    if kind == "k8s":
+        from swarmrl.sandbox.kubernetes import KubernetesSandboxFactory
+
+        f = KubernetesSandboxFactory(namespace=a.namespace)
+        f.ensure_network_policy()
+        return f
     from swarmrl.sandbox.local import LocalSandboxFactory
 
     return LocalSandboxFactory()
@@ -33,29 +53,66 @@ def _swarm(single: bool):
     return single_agent_config() if single else default_swarm_config()
 
 
-def cmd_validate(a) -> int:
+def _validator(tasks_dir: str, factory):
+    from swarmrl.tasks.validate import TaskValidator, ValidationCache
+
+    return TaskValidator(factory, ValidationCache(Path(tasks_dir) / ".validation.json"))
+
+
+def _runner(a, cfg, factory, validator, policy=None, chat=None, checkpoint: str | None = None):
     from swarmrl.grading.grader import CleanRoomGrader
-    from swarmrl.inference.chat import ByteTokenizer, ChatFormat
+    from swarmrl.inference.chat import ByteTokenizer, ChatFormat, HFTokenizer
+    from swarmrl.inference.client import SGLangClient
     from swarmrl.swarm.runtime import EpisodeRunner
+
+    if chat is None:  # "byte" = deterministic byte tokenizer for dry runs against a stub server
+        chat = ChatFormat(ByteTokenizer() if a.tokenizer == "byte" else HFTokenizer(a.tokenizer))
+    policy = policy or SGLangClient(a.server)
+    return EpisodeRunner(cfg, policy, chat, factory, CleanRoomGrader(factory, cfg.protected_paths), validator.validate,
+                         model_checkpoint=checkpoint or a.checkpoint)  # fmt: skip
+
+
+def _dispatcher(a, runner):
+    from swarmrl.swarm.dispatcher import Dispatcher, DispatchLimits
+    from swarmrl.traces.store import TraceStore
+
+    store = TraceStore(a.traces)
+    return Dispatcher(runner, DispatchLimits(a.workers, a.in_flight, a.workers), on_episode=store.put)
+
+
+def _valid_tasks(tasks, validator) -> list:
+    ok = []
+    for t in tasks:
+        rec = validator.validate(t)
+        if rec.valid:
+            ok.append(t)
+        else:
+            log.warning("skipping %s: %s", t.task_id, rec.reason)
+    return ok
+
+
+# --- commands ------------------------------------------------------------------------------
+
+
+def cmd_validate(a) -> int:
+    from swarmrl.inference.chat import ByteTokenizer, ChatFormat
     from swarmrl.tasks.harbor import load_tasks
     from swarmrl.tasks.oracle_agent import run_oracle_agent
     from swarmrl.tasks.splits import contamination
-    from swarmrl.tasks.validate import TaskValidator, ValidationCache
 
     tasks = load_tasks(a.tasks)
-    f = _factory(a.docker)
+    f = _factory(a)
     cfg = _swarm(False)
-    cache = ValidationCache(Path(a.tasks) / ".validation.json")
-    v = TaskValidator(f, cache)
+    v = _validator(a.tasks, f)
     bad = 0
     for t in tasks:
         rec = v.validate(t)
         if rec.valid and a.oracle_agent and rec.oracle_agent_resolved is None:
-            chat = ChatFormat(ByteTokenizer())
-            mk = lambda pol, rec=rec: EpisodeRunner(cfg, pol, chat, f, CleanRoomGrader(f, cfg.protected_paths), lambda _t: rec)  # noqa: E731
-            ep = asyncio.run(run_oracle_agent(t, mk, f))
+            chat = ChatFormat(ByteTokenizer())  # the oracle agent never calls a model
+            mk = lambda pol, chat=chat: _runner(a, cfg, f, v, policy=pol, chat=chat, checkpoint="oracle")  # noqa: E731
+            ep = asyncio.run(run_oracle_agent(t, mk, f, cfg, chat))
             rec.oracle_agent_resolved = ep.resolved
-            cache.put(rec)
+            v.cache.put(rec)
         ok = rec.valid and rec.oracle_agent_resolved is not False
         bad += not ok
         print(f"{'OK ' if ok else 'BAD'} {t.task_id:40s} f2p={len(rec.fail_to_pass)} p2p={len(rec.pass_to_pass)} "
@@ -63,6 +120,7 @@ def cmd_validate(a) -> int:
     for c in contamination(tasks):
         print("CONTAMINATION", c)
         bad += 1
+    print(f"{len(tasks) - bad}/{len(tasks)} tasks ready")
     return 1 if bad else 0
 
 
@@ -76,41 +134,40 @@ def cmd_mutants(a) -> int:
 
 
 def cmd_eval(a) -> int:
-    from swarmrl.evals.report import eval_requests, render_markdown
     from swarmrl.evals.metrics import compute_metrics
-    from swarmrl.grading.grader import CleanRoomGrader
-    from swarmrl.inference.chat import ChatFormat, HFTokenizer
-    from swarmrl.inference.client import SGLangClient
-    from swarmrl.swarm.dispatcher import DispatchLimits, Dispatcher
-    from swarmrl.swarm.runtime import EpisodeRunner
+    from swarmrl.evals.report import eval_requests, render_markdown, write_report
     from swarmrl.tasks.harbor import load_tasks
-    from swarmrl.tasks.validate import TaskValidator, ValidationCache
-    from swarmrl.traces.store import TraceStore
 
-    tasks = load_tasks(a.tasks, a.split)
-    f = _factory(a.docker)
+    f = _factory(a)
+    v = _validator(a.tasks, f)
+    tasks = _valid_tasks(load_tasks(a.tasks, a.split), v)
     cfg = _swarm(a.single_agent).with_sampling(temperature=a.temperature, top_p=1.0)
-    v = TaskValidator(f, ValidationCache(Path(a.tasks) / ".validation.json"))
-    chat = ChatFormat(HFTokenizer(a.tokenizer))
-    runner = EpisodeRunner(cfg, SGLangClient(a.server), chat, f, CleanRoomGrader(f, cfg.protected_paths),
-                           v.validate, model_checkpoint=a.checkpoint)  # fmt: skip
-    store = TraceStore(a.traces)
-    d = Dispatcher(runner, DispatchLimits(a.workers, a.in_flight, a.workers), on_episode=store.put)
+    d = _dispatcher(a, _runner(a, cfg, f, v))
     eps = d.run_sync(eval_requests(tasks, a.k))
     m = compute_metrics(eps, k_values=tuple(x for x in (1, 4, 8) if x <= a.k))
-    print(render_markdown(m, f"Eval {a.split} @ {a.checkpoint}"))
+    title = f"Eval {a.split} @ {a.checkpoint}"
+    if a.report:
+        write_report(m, a.report, a.report.rsplit(".", 1)[0] + ".json", title)
+    print(render_markdown(m, title))
     return 0
 
 
-def cmd_report(a) -> int:
-    from swarmrl.evals.metrics import compute_metrics
-    from swarmrl.evals.report import render_markdown
-    from swarmrl.traces.store import TraceStore
+def cmd_rejection_sample(a) -> int:
+    from swarmrl.rl.curriculum import min_turns_resolved
+    from swarmrl.sft.rejection import AdaptiveSampler, run_rejection_sampling
+    from swarmrl.tasks.harbor import load_tasks
 
-    filt = {k: v for k, v in (("split", a.split), ("model_checkpoint", a.checkpoint)) if v}
-    eps = list(TraceStore(a.traces).episodes(**filt))
-    m = compute_metrics(eps)
-    print(json.dumps(m, indent=1, default=list) if a.json else render_markdown(m))
+    f = _factory(a)
+    v = _validator(a.tasks, f)
+    tasks = _valid_tasks(load_tasks(a.tasks, "train"), v)
+    cfg = _swarm(a.single_agent).with_sampling(temperature=a.temperature, top_p=1.0)
+    d = _dispatcher(a, _runner(a, cfg, f, v))
+    sampler = AdaptiveSampler(tasks, a.target_successes, a.max_attempts, a.per_round)
+    eps = run_rejection_sampling(d, sampler)
+    out = {"solve_rates": sampler.solve_rates(), "min_turns": min_turns_resolved(eps),
+           "never_solved": sampler.never_solved(), "fingerprint": cfg.fingerprint()}  # fmt: skip
+    Path(a.out).write_text(json.dumps(out, indent=1))
+    print(f"{len(eps)} episodes; {len(out['never_solved'])} tasks never solved; solve rates -> {a.out}")
     return 0
 
 
@@ -129,20 +186,121 @@ def cmd_sft_data(a) -> int:
     print(json.dumps({"episodes": len(eps), "kept": len(kept), "dropped_by_rule": dict(rep.dropped),
                       "deduped": rep.deduped, "capped": rep.capped, "samples": len(samples),
                       "overlength_dropped": dropped}, indent=1))  # fmt: skip
+    return 0 if samples else 1
+
+
+def cmd_sft_train(a) -> int:
+    from swarmrl.sft.train import QLoRAConfig, train_qlora
+
+    cfg = QLoRAConfig(
+        a.base_model, a.out, lora_rank=a.lora_rank, learning_rate=a.lr, epochs=a.epochs, max_len=a.max_len
+    )
+    print(train_qlora(cfg, a.samples))
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="swarmrl")
+def cmd_merge(a) -> int:
+    from swarmrl.sft.train import merge_adapter
+
+    print(merge_adapter(a.base_model, a.adapter, a.out))
+    return 0
+
+
+def cmd_rl(a) -> int:
+    from swarmrl.inference.client import SGLangClient
+    from swarmrl.inference.weight_sync import DiskWeightSync, SGLangAdmin
+    from swarmrl.observability import MetricsSink
+    from swarmrl.rl.curriculum import Curriculum, stage_pool
+    from swarmrl.rl.loop import RLLoop, stage0_verdict
+    from swarmrl.rl.schedule import stage
+    from swarmrl.rl.trainer import TorchPolicyTrainer, TorchTrainerConfig
+    from swarmrl.tasks.harbor import load_tasks
+
+    st = stage(a.stage)
+    f = _factory(a)
+    v = _validator(a.tasks, f)
+    tasks = {t.task_id: t for t in _valid_tasks(load_tasks(a.tasks, "train"), v)}
+    rates_file = json.loads(Path(a.solve_rates).read_text())
+    rates = {k: p for k, p in rates_file["solve_rates"].items() if k in tasks}
+    allowed = stage_pool(rates, st.data_lo, st.data_hi, st.max_turns_to_solve, rates_file.get("min_turns"))
+    if not allowed:
+        print(f"no tasks fit stage {st.name}'s data filter ({st.data_lo}-{st.data_hi}); re-measure solve rates")
+        return 1
+    cfg = st.apply(_swarm(False))
+    client = SGLangClient(a.server)
+    runner = _runner(a, cfg, f, v, policy=client, checkpoint=f"{a.run_name}:{st.name}")
+    tcfg = TorchTrainerConfig(
+        a.model,
+        str(Path(a.output_dir) / "checkpoints"),
+        lora_rank=a.lora_rank,
+        learning_rate=a.lr,
+        save_mode=a.sync_mode,
+    )
+    trainer = TorchPolicyTrainer(tcfg)
+    sync = DiskWeightSync(SGLangAdmin(a.server), a.sync_mode, client, colocated=a.colocated)
+    loop = RLLoop(_dispatcher(a, runner), trainer, sync, Curriculum(rates, seed=a.seed), st, tasks,
+                  batch_tasks=a.batch_tasks, allowed_tasks=allowed,
+                  log=MetricsSink(str(Path(a.output_dir) / "metrics.jsonl")))  # fmt: skip
+    hist = loop.run(a.steps)
+    if st.lr_scale == 0.0:
+        verdict = stage0_verdict(hist)
+        print("STAGE 0 PASS" if verdict.passed else "STAGE 0 FAIL\n" + "\n".join(verdict.reasons))
+        return 0 if verdict.passed else 1
+    print(f"done: {len(hist)} steps, last checkpoint {loop.checkpoint}")
+    return 0
+
+
+def cmd_report(a) -> int:
+    from swarmrl.evals.metrics import compute_metrics
+    from swarmrl.evals.report import render_markdown
+    from swarmrl.traces.store import TraceStore
+
+    filt = {k: v for k, v in (("split", a.split), ("model_checkpoint", a.checkpoint)) if v}
+    eps = list(TraceStore(a.traces).episodes(**filt))
+    m = compute_metrics(eps)
+    print(json.dumps(m, indent=1, default=list) if a.json else render_markdown(m))
+    return 0
+
+
+# --- argument parsing ----------------------------------------------------------------------
+
+
+def _add_sandbox(s) -> None:
+    s.add_argument("--sandbox", choices=["local", "docker", "k8s"], default="local",
+                   help="local is for development only: no network or resource isolation")  # fmt: skip
+    s.add_argument("--namespace", default="swarmrl", help="k8s namespace for sandbox pods")
+
+
+def _add_serving(s) -> None:
+    s.add_argument(
+        "--server", nargs="+", required=True, help="SGLang base URL(s); turns are routed sticky per (episode, role)"
+    )
+    s.add_argument(
+        "--tokenizer",
+        required=True,
+        help="HF tokenizer name or path (must match the served model); 'byte' for dry runs",
+    )
+    s.add_argument("--checkpoint", default="base", help="label recorded in every trace")
+    s.add_argument("--traces", default="traces")
+    s.add_argument("--workers", type=int, default=16, help="CPU pool for container start-up and grading")
+    s.add_argument("--in-flight", type=int, default=128, help="max episodes in the run stage at once")
+    s.add_argument("--single-agent", action="store_true")
+    _add_sandbox(s)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="swarmrl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("validate")
+    s = sub.add_parser("validate", help="validate Harbor tasks")
     s.add_argument("tasks")
-    s.add_argument("--docker", action="store_true")
     s.add_argument("--oracle-agent", action="store_true")
+    _add_sandbox(s)
     s.set_defaults(fn=cmd_validate)
 
-    s = sub.add_parser("mutants")
+    s = sub.add_parser("mutants", help="generate procedural-mutant tasks from a repo")
     s.add_argument("repo")
     s.add_argument("--tests", required=True)
     s.add_argument("--targets", nargs="+", required=True)
@@ -153,29 +311,26 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--split", default="train")
     s.set_defaults(fn=cmd_mutants)
 
-    s = sub.add_parser("eval")
+    s = sub.add_parser("eval", help="eval path A")
     s.add_argument("tasks")
     s.add_argument("--split", default="dev")
-    s.add_argument("--server", nargs="+", required=True)
-    s.add_argument("--tokenizer", required=True)
-    s.add_argument("--checkpoint", default="base")
-    s.add_argument("--traces", default="traces")
     s.add_argument("-k", type=int, default=8)
     s.add_argument("--temperature", type=float, default=1.0)
-    s.add_argument("--workers", type=int, default=16)
-    s.add_argument("--in-flight", type=int, default=128)
-    s.add_argument("--docker", action="store_true")
-    s.add_argument("--single-agent", action="store_true")
+    s.add_argument("--report", help="write markdown (+ .json) report here")
+    _add_serving(s)
     s.set_defaults(fn=cmd_eval)
 
-    s = sub.add_parser("report")
-    s.add_argument("traces")
-    s.add_argument("--split")
-    s.add_argument("--checkpoint")
-    s.add_argument("--json", action="store_true")
-    s.set_defaults(fn=cmd_report)
+    s = sub.add_parser("rejection-sample", help="adaptive rejection sampling on the train split")
+    s.add_argument("tasks")
+    s.add_argument("--out", default="solve_rates.json")
+    s.add_argument("--temperature", type=float, default=0.9)
+    s.add_argument("--target-successes", type=int, default=4)
+    s.add_argument("--max-attempts", type=int, default=16)
+    s.add_argument("--per-round", type=int, default=4)
+    _add_serving(s)
+    s.set_defaults(fn=cmd_rejection_sample)
 
-    s = sub.add_parser("sft-data")
+    s = sub.add_parser("sft-data", help="build SFT samples from traces")
     s.add_argument("traces")
     s.add_argument("--out", required=True)
     s.add_argument("--fingerprint")
@@ -186,11 +341,59 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--teacher-fraction", type=float, default=0.5)
     s.set_defaults(fn=cmd_sft_data)
 
-    s = sub.add_parser("fingerprint")
+    s = sub.add_parser("sft-train", help="QLoRA SFT")
+    s.add_argument("samples")
+    s.add_argument("--base-model", required=True)
+    s.add_argument("--out", required=True)
+    s.add_argument("--lora-rank", type=int, default=32)
+    s.add_argument("--lr", type=float, default=1e-4)
+    s.add_argument("--epochs", type=float, default=2.0)
+    s.add_argument("--max-len", type=int, default=32_768)
+    s.set_defaults(fn=cmd_sft_train)
+
+    s = sub.add_parser("merge", help="merge a LoRA adapter into bf16 base weights")
+    s.add_argument("--base-model", required=True)
+    s.add_argument("--adapter", required=True)
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_merge)
+
+    s = sub.add_parser("rl", help="staged GRPO (single-process torch trainer)")
+    s.add_argument("tasks")
+    s.add_argument("--model", required=True, help="trainer weights: the merged SFT checkpoint SGLang is serving")
+    s.add_argument("--solve-rates", required=True, help="JSON from rejection-sample (re-measure per stage)")
+    s.add_argument("--stage", default="1", help="0 (correctness), 1, 2 or 3")
+    s.add_argument("--steps", type=int)
+    s.add_argument("--batch-tasks", type=int, default=16)
+    s.add_argument("--lr", type=float, default=1e-6)
+    s.add_argument("--lora-rank", type=int, default=32)
+    s.add_argument("--sync-mode", choices=["merged", "adapter"], default="adapter")
+    s.add_argument("--colocated", action="store_true", help="trainer and SGLang share GPUs")
+    s.add_argument("--output-dir", default="runs/rl")
+    s.add_argument("--run-name", default="rl")
+    s.add_argument("--seed", type=int, default=0)
+    _add_serving(s)
+    s.set_defaults(fn=cmd_rl)
+
+    s = sub.add_parser("report", help="metrics report from the trace store")
+    s.add_argument("traces")
+    s.add_argument("--split")
+    s.add_argument("--checkpoint")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("fingerprint", help="print the swarm fingerprint")
     s.add_argument("--single-agent", action="store_true")
     s.set_defaults(fn=lambda a: print(_swarm(a.single_agent).fingerprint()) or 0)
+    return p
 
-    a = p.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    from swarmrl.observability import setup_logging
+
+    setup_logging()
+    a = build_parser().parse_args(argv)
+    if getattr(a, "stage", None) is not None and str(a.stage).isdigit():
+        a.stage = int(a.stage)
     return a.fn(a)
 
 

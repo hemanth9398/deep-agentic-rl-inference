@@ -3,17 +3,15 @@ import asyncio
 import numpy as np
 import pytest
 
-from conftest import call
-
+from swarmrl.inference.weight_sync import NullWeightSync
 from swarmrl.integrations.skyrl import episode_rows, skyrl_overrides
 from swarmrl.rl.advantages import grpo_advantages, informative_probability
 from swarmrl.rl.curriculum import Curriculum, stage_pool
 from swarmrl.rl.loop import RLLoop, stage0_verdict
-from swarmrl.rl.loss import (OffPolicyConfig, alignment_shift, clipped_pg_loss, importance_weights,
-                             mismatch_kl)
+from swarmrl.rl.loss import OffPolicyConfig, alignment_shift, clipped_pg_loss, importance_weights, mismatch_kl
 from swarmrl.rl.packing import pack_episode
 from swarmrl.rl.schedule import STAGES, stage
-from swarmrl.inference.weight_sync import NullWeightSync
+from swarmrl.rl.trainer import Trainer
 from swarmrl.swarm.config import default_swarm_config
 from swarmrl.swarm.dispatcher import Dispatcher
 from swarmrl.tasks.oracle_agent import oracle_file_states, oracle_script
@@ -34,7 +32,7 @@ def test_packing_rebuilds_each_role_context(oracle_ep):
         last = ts[-1]
         assert s.input_ids == last.input_ids + last.output_ids + last.closing_ids
         assert s.num_policy_tokens() == sum(len(t.output_ids) for t in ts)
-        pol = [lp for lp, m in zip(s.rollout_logprobs, s.loss_mask) if m]
+        pol = [lp for lp, m in zip(s.rollout_logprobs, s.loss_mask, strict=True) if m]
         assert pol == [lp for t in ts for lp in t.rollout_logprobs]
         assert s.prompt_len == len(ts[0].input_ids)
 
@@ -57,7 +55,9 @@ def test_grpo_per_role_normalization():
     ]
     adv, st = grpo_advantages(eps)
     assert st.informative_groups == 1
-    assert adv[("a", "planner")] == pytest.approx(1.0, abs=1e-4) and adv[("b", "planner")] == pytest.approx(-1.0, abs=1e-4)
+    assert adv[("a", "planner")] == pytest.approx(1.0, abs=1e-4) and adv[("b", "planner")] == pytest.approx(
+        -1.0, abs=1e-4
+    )
     # tester acted in a, c, d only: mean 2/3
     assert adv[("a", "tester")] > 0 > adv[("c", "tester")]
     assert ("b", "tester") not in adv
@@ -103,7 +103,7 @@ def test_curriculum_sampling():
     assert stage_pool({"b": 0.5}, 0.125, 0.875, max_turns=10, min_turns={"b": 12}) == []
 
 
-class FakeTrainer:
+class FakeTrainer(Trainer):
     """Scores with the rollout log-probs (+ optional drift): what a correct data path produces."""
 
     def __init__(self, drift=0.0, shift=0):
@@ -128,22 +128,43 @@ def test_rl_loop_stage0(make_runner, task, factory):
 
     runner = make_runner(good, s0.apply(cfg))
     sync = NullWeightSync()
-    loop = RLLoop(Dispatcher(runner), FakeTrainer(), sync, Curriculum({task.task_id: 0.5}), s0,
-                  {task.task_id: task}, batch_tasks=1, log=lambda m: None)
+    loop = RLLoop(
+        Dispatcher(runner),
+        FakeTrainer(),
+        sync,
+        Curriculum({task.task_id: 0.5}),
+        s0,
+        {task.task_id: task},
+        batch_tasks=1,
+        log=lambda m: None,
+    )
     hist = loop.run()
     assert len(hist) == 2 and loop.version == 2
-    assert sync.calls == [("/ckpt/v1", 1)]  # step 2 syncs the step-1 weights first
+    assert [c for c in sync.calls if c[0] != "before_training"] == [
+        ("/ckpt/v1", 1)
+    ]  # step 2 syncs step-1 weights first
+    assert sync.calls.count(("before_training", -1)) == 2
     assert hist[0]["episodes"] == s0.group_size and hist[0]["policy_tokens"] > 0
     assert stage0_verdict(hist).passed
-    bad = RLLoop(Dispatcher(runner), FakeTrainer(shift=1), NullWeightSync(), Curriculum({task.task_id: 0.5}), s0,
-                 {task.task_id: task}, batch_tasks=1, log=lambda m: None).run(1)
+    bad = RLLoop(
+        Dispatcher(runner),
+        FakeTrainer(shift=1),
+        NullWeightSync(),
+        Curriculum({task.task_id: 0.5}),
+        s0,
+        {task.task_id: task},
+        batch_tasks=1,
+        log=lambda m: None,
+    ).run(1)
     v = stage0_verdict(bad)
     assert not v.passed and "alignment shift" in v.reasons[0]
 
 
 def test_skyrl_rows_and_overrides(oracle_ep):
     rows = episode_rows(oracle_ep, repetition=3)
-    assert {r["instance_id"] for r in rows} == {f"{oracle_ep.task_id}::{r}" for r in ("planner", "coder", "tester", "reviewer")}
+    assert {r["instance_id"] for r in rows} == {
+        f"{oracle_ep.task_id}::{r}" for r in ("planner", "coder", "tester", "reviewer")
+    }
     assert all(r["is_last_step"] for r in rows)  # one packed sample per role here
     for r in rows:
         assert len(r["response_ids"]) == len(r["loss_mask"]) == len(r["rollout_logprobs"])

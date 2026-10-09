@@ -7,7 +7,9 @@
   swarmrl sft-data TRACES --out samples.jsonl       filter episodes -> transition-level SFT samples
   swarmrl sft-train SAMPLES --base-model M --out D  QLoRA SFT                         (needs .[sft])
   swarmrl merge --base-model M --adapter A --out D  merge a LoRA adapter in bf16       (needs .[sft])
-  swarmrl rl TASKS --server URL --model M ...       staged GRPO with the torch trainer (needs .[sft])
+  swarmrl rl TASKS --server URL --model M ...       staged RL with the torch trainer (needs .[train]);
+                                                    --advantage grpo (default) | gigpo (experimental)
+  swarmrl advantages TRACES [--group G]             GRPO vs GiGPO advantages per turn, side by side
   swarmrl report TRACES [--split S]                 metrics report from the trace store
   swarmrl fingerprint [--single-agent]              print the swarm fingerprint
 
@@ -211,6 +213,7 @@ def cmd_rl(a) -> int:
     from swarmrl.inference.weight_sync import DiskWeightSync, SGLangAdmin
     from swarmrl.observability import MetricsSink
     from swarmrl.rl.curriculum import Curriculum, stage_pool
+    from swarmrl.rl.gigpo import GiGPOConfig
     from swarmrl.rl.loop import RLLoop, stage0_verdict
     from swarmrl.rl.schedule import stage
     from swarmrl.rl.trainer import TorchPolicyTrainer, TorchTrainerConfig
@@ -238,15 +241,47 @@ def cmd_rl(a) -> int:
     )
     trainer = TorchPolicyTrainer(tcfg)
     sync = DiskWeightSync(SGLangAdmin(a.server), a.sync_mode, client, colocated=a.colocated)
-    loop = RLLoop(_dispatcher(a, runner), trainer, sync, Curriculum(rates, seed=a.seed), st, tasks,
-                  batch_tasks=a.batch_tasks, allowed_tasks=allowed,
-                  log=MetricsSink(str(Path(a.output_dir) / "metrics.jsonl")))  # fmt: skip
+    loop = RLLoop(
+        _dispatcher(a, runner),
+        trainer,
+        sync,
+        Curriculum(rates, seed=a.seed),
+        st,
+        tasks,
+        batch_tasks=a.batch_tasks,
+        allowed_tasks=allowed,
+        log=MetricsSink(str(Path(a.output_dir) / "metrics.jsonl")),
+        advantage_estimator=a.advantage,
+        gigpo=GiGPOConfig(omega=a.gigpo_omega, gamma=a.gigpo_gamma, state_key=a.gigpo_state_key),
+    )
     hist = loop.run(a.steps)
     if st.lr_scale == 0.0:
         verdict = stage0_verdict(hist)
         print("STAGE 0 PASS" if verdict.passed else "STAGE 0 FAIL\n" + "\n".join(verdict.reasons))
         return 0 if verdict.passed else 1
     print(f"done: {len(hist)} steps, last checkpoint {loop.checkpoint}")
+    return 0
+
+
+def cmd_advantages(a) -> int:
+    from swarmrl.rl.gigpo import GiGPOConfig, explain, step_advantages
+    from swarmrl.traces.store import TraceStore
+
+    eps = [e for e in TraceStore(a.traces).episodes() if a.group is None or (e.group_id or e.task_id) == a.group]
+    cfg = GiGPOConfig(omega=a.gigpo_omega, gamma=a.gigpo_gamma, state_key=a.gigpo_state_key)
+    rows = explain(eps, cfg)
+    _, stats = step_advantages(eps, cfg)
+    if a.json:
+        print(json.dumps({"stats": vars(stats), "rows": rows}, indent=1))
+        return 0
+    cols = ["group", "episode", "reward", "turn", "role", "tool", "state", "grpo", "step", "gigpo"]
+    print(" | ".join(cols))
+    for r in rows:
+        print(" | ".join("-" if r[c] is None else str(r[c]) for c in cols))
+    print(
+        f"\n{stats.anchor_groups} anchor groups; {stats.anchored_turns}/{stats.total_turns} turns "
+        f"({stats.anchored_fraction:.0%}) got a step-level advantage; largest anchor {stats.max_anchor_size}"
+    )
     return 0
 
 
@@ -371,8 +406,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--output-dir", default="runs/rl")
     s.add_argument("--run-name", default="rl")
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--advantage", choices=["grpo", "gigpo"], default="grpo",
+                   help="grpo: per-role GRPO (default). gigpo: experimental two-level GiGPO")  # fmt: skip
+    s.add_argument("--gigpo-omega", type=float, default=1.0, help="weight of GiGPO's step-level advantage")
+    s.add_argument("--gigpo-gamma", type=float, default=0.95, help="discount for GiGPO step returns")
+    s.add_argument("--gigpo-state-key", choices=["env", "context"], default="env", help="what counts as one state")
     _add_serving(s)
     s.set_defaults(fn=cmd_rl)
+
+    s = sub.add_parser("advantages", help="compare GRPO and GiGPO advantages on stored traces, turn by turn")
+    s.add_argument("traces")
+    s.add_argument("--group", help="only this group id (e.g. step3:task-id)")
+    s.add_argument("--gigpo-omega", type=float, default=1.0)
+    s.add_argument("--gigpo-gamma", type=float, default=0.95)
+    s.add_argument("--gigpo-state-key", choices=["env", "context"], default="env")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_advantages)
 
     s = sub.add_parser("report", help="metrics report from the trace store")
     s.add_argument("traces")

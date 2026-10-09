@@ -1,0 +1,18 @@
+diff --git a/stats/core.py b/stats/core.py
+--- a/stats/core.py
++++ b/stats/core.py
+@@ -1,9 +1,13 @@
+ def mean(values):
+     """Arithmetic mean of a sequence of numbers."""
++    if not values:
++        return 0.0
+     return sum(values) / len(values)
+ 
+ 
+ def median(values):
+     """Median of a sequence of numbers."""
++    if not values:
++        return 0.0
+     ordered = sorted(values)
+     n = len(ordered)
+     mid = n // 2

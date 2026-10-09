@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Termination(str, Enum):
+class Termination(StrEnum):
     SUBMIT = "submit"
     TURN_BUDGET = "turn_budget"
     TOKEN_BUDGET = "token_budget"
@@ -27,7 +27,7 @@ class Termination(str, Enum):
         return self is not Termination.INFRA_ERROR
 
 
-class ErrorKind(str, Enum):
+class ErrorKind(StrEnum):
     NO_TOOL_CALL = "no_tool_call"
     BAD_JSON = "bad_json"
     UNKNOWN_TOOL = "unknown_tool"
@@ -142,7 +142,7 @@ class Episode:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Episode":
+    def from_dict(cls, d: dict[str, Any]) -> Episode:
         d = dict(d)
         d["termination"] = Termination(d["termination"])
         d["grade"] = GradeSummary(**d.get("grade", {}))
@@ -154,7 +154,7 @@ class Episode:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_json(cls, s: str) -> "Episode":
+    def from_json(cls, s: str) -> Episode:
         return cls.from_dict(json.loads(s))
 
     def summary(self) -> dict[str, Any]:

@@ -54,9 +54,7 @@ class TraceStore:
     def query(self, **equals: Any) -> list[dict[str, Any]]:
         return [r for r in self.index() if all(r.get(k) == v for k, v in equals.items())]
 
-    def episodes(
-        self, where: Callable[[dict[str, Any]], bool] | None = None, **equals: Any
-    ) -> Iterator[Episode]:
+    def episodes(self, where: Callable[[dict[str, Any]], bool] | None = None, **equals: Any) -> Iterator[Episode]:
         for row in self.query(**equals):
             if where is None or where(row):
                 yield self.get(row["episode_id"])

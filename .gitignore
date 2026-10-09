@@ -5,4 +5,7 @@ __pycache__/
 build/
 dist/
 .validation.json
-traces/
+# runtime trace-store output at the repo root (anchored: must not match the swarmrl/traces package)
+/traces/
+.ruff_cache/
+/runs/

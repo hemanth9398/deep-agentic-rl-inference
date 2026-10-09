@@ -15,6 +15,7 @@ scripts/verify/weight_sync.py against it:
 
 from __future__ import annotations
 
+import abc
 import json
 import urllib.request
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ class SGLangAdmin:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
                     body = r.read()
-            except Exception as e:  # noqa: BLE001 - surface any transport error as infra
+            except Exception as e:
                 raise InfraError(f"{s}{path} failed: {e}") from e
             try:
                 out.append(json.loads(body) if body else {})
@@ -56,7 +57,8 @@ class SGLangAdmin:
 
     def update_weights_from_disk(self, model_path: str, weight_version: str | None = None) -> None:
         res = self._call(
-            "/update_weights_from_disk", {"model_path": model_path, "weight_version": weight_version, "abort_all_requests": True}
+            "/update_weights_from_disk",
+            {"model_path": model_path, "weight_version": weight_version, "abort_all_requests": True},
         )
         for r in res:
             if r.get("success") is False:
@@ -76,8 +78,20 @@ class SGLangAdmin:
             return json.loads(r.read())
 
 
+class WeightSync(abc.ABC):
+    """Moves trainer weights into the inference servers between RL steps."""
+
+    @abc.abstractmethod
+    def before_training(self) -> None:
+        """Called before the trainer runs (colocated: free the servers' GPU memory)."""
+
+    @abc.abstractmethod
+    def sync(self, checkpoint_path: str, version: int) -> None:
+        """Load `checkpoint_path` as policy `version` everywhere and flush every KV cache."""
+
+
 @dataclass
-class DiskWeightSync:
+class DiskWeightSync(WeightSync):
     """Push a checkpoint written by the trainer into every SGLang server, then flush the KV cache."""
 
     admin: SGLangAdmin
@@ -85,14 +99,16 @@ class DiskWeightSync:
     client: object | None = None  # SGLangClient, to switch lora_name in adapter mode
     colocated: bool = True
     history: list[str] = field(default_factory=list)
+    released: bool = False
 
     def before_training(self) -> None:
         """Colocated: free GPU memory for the trainer."""
-        if self.colocated:
+        if self.colocated and not self.released:
             self.admin.release_memory(["kv_cache", "weights"])
+            self.released = True
 
     def sync(self, checkpoint_path: str, version: int) -> None:
-        if self.colocated:
+        if self.colocated and self.released:
             self.admin.resume_memory(["weights"])
         if self.mode == "merged":
             self.admin.update_weights_from_disk(checkpoint_path, weight_version=str(version))
@@ -104,19 +120,20 @@ class DiskWeightSync:
             if self.history:
                 self.admin.unload_lora_adapter(self.history[-1])
             self.history.append(name)
-        if self.colocated:
+        if self.colocated and self.released:
             self.admin.resume_memory(["kv_cache"])
+            self.released = False
         self.admin.flush_cache()  # never skip: stale prefixes would leak old-policy activations
 
 
 @dataclass
-class NullWeightSync:
-    """For dry runs and stage-0 checks with lr=0."""
+class NullWeightSync(WeightSync):
+    """Records calls without touching a server: dry runs, and stage 0 when the server already holds the weights."""
 
     calls: list[tuple[str, int]] = field(default_factory=list)
 
     def before_training(self) -> None:
-        pass
+        self.calls.append(("before_training", -1))
 
     def sync(self, checkpoint_path: str, version: int) -> None:
         self.calls.append((checkpoint_path, version))

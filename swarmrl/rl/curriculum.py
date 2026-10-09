@@ -68,7 +68,11 @@ def min_turns_resolved(episodes: Iterable[Episode]) -> dict[str, int]:
 
 
 def stage_pool(
-    solve_rates: dict[str, float], lo: float, hi: float, max_turns: int | None = None, min_turns: dict[str, int] | None = None
+    solve_rates: dict[str, float],
+    lo: float,
+    hi: float,
+    max_turns: int | None = None,
+    min_turns: dict[str, int] | None = None,
 ) -> list[str]:
     """Stage data filter, e.g. stage 1: solve rate 0.125-0.875 and solvable within 10 turns."""
     out = []

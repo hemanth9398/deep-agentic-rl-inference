@@ -23,7 +23,7 @@ RUBRIC_BUDGET = 0.2
 class RubricTerm:
     name: str
     weight: float
-    fn: Callable[["object"], float]  # Episode -> score in [0, 1]
+    fn: Callable[[object], float]  # Episode -> score in [0, 1]
 
 
 def validate_rubric(terms: Sequence[RubricTerm]) -> None:

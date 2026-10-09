@@ -6,8 +6,19 @@ from swarmrl.traces.schema import Episode, GradeSummary, Termination, Transition
 
 
 def ep(task, resolved, term=Termination.SUBMIT, transitions=(), diff="x", protected=()):
-    e = Episode("e" + str(id(object())), task, "dev", "fp", "ck", 0, term, float(resolved),
-                GradeSummary(resolved=resolved), list(protected), diff)
+    e = Episode(
+        "e" + str(id(object())),
+        task,
+        "dev",
+        "fp",
+        "ck",
+        0,
+        term,
+        float(resolved),
+        GradeSummary(resolved=resolved),
+        list(protected),
+        diff,
+    )
     e.transitions = list(transitions)
     return e
 
@@ -25,7 +36,9 @@ def test_wilson_and_pass_at_k():
 
 def test_metrics_process_and_taxonomy():
     good = ep("t1", True, transitions=[tr("coder", "str_replace"), tr("tester", "run_tests"), tr("reviewer", "accept")])
-    stamp = ep("t1", False, transitions=[tr("coder", "str_replace"), tr("tester", "run_tests"), tr("reviewer", "accept")])
+    stamp = ep(
+        "t1", False, transitions=[tr("coder", "str_replace"), tr("tester", "run_tests"), tr("reviewer", "accept")]
+    )
     hack = ep("t2", False, protected=["tests/x.py"])
     infra = ep("t2", False, term=Termination.INFRA_ERROR)
     m = compute_metrics([good, stamp, hack, infra], k_values=(1,))
@@ -34,8 +47,12 @@ def test_metrics_process_and_taxonomy():
     assert m["tester_ran_tests_after_last_edit"] == pytest.approx(2 / 3)
     assert m["reviewer_agreement"] == pytest.approx(0.5)
     assert m["failures"] == {"reviewer_rubber_stamped": 1, "hack_attempt": 1}
-    assert classify_failure(ep("t", False, transitions=[tr("planner", "delegate", plan="look at utils.py")]),
-                            ["stats/core.py"]) == "wrong_file_planned"
+    assert (
+        classify_failure(
+            ep("t", False, transitions=[tr("planner", "delegate", plan="look at utils.py")]), ["stats/core.py"]
+        )
+        == "wrong_file_planned"
+    )
 
 
 def test_compare_runs_keep_rule():

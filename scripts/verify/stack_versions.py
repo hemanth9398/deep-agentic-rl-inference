@@ -17,7 +17,7 @@ def version(mod: str) -> str:
     try:
         m = importlib.import_module(mod)
         return getattr(m, "__version__", "installed")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return f"missing ({type(e).__name__})"
 
 
@@ -26,13 +26,15 @@ def main() -> int:
         print(f"{mod:14s} {version(mod)}")
     ok = True
     try:
-        from skyrl.train.config.config import InferenceEngineConfig  # noqa: F401
         import dataclasses
+
+        from skyrl.train.config.config import InferenceEngineConfig
+
         f = {x.name: x for x in dataclasses.fields(InferenceEngineConfig)}
         print("skyrl inference backend default:", f["backend"].default)
         if f["backend"].default != "sglang":
             print("WARNING: SkyRL will not drive SGLang engines; use option (a) or (b) in integrations/skyrl.py")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print("skyrl config check skipped:", type(e).__name__, e)
     if shutil.which("vf-eval"):
         r = subprocess.run(["vf-eval", "--help"], capture_output=True, text=True)

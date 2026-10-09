@@ -10,17 +10,23 @@ decoded and re-encoded, so the trainer sees exactly the tokens the sampler produ
 
 from __future__ import annotations
 
+import abc
 import re
 from dataclasses import dataclass
-from typing import Protocol
 
 
-class Tokenizer(Protocol):
-    def encode(self, text: str) -> list[int]: ...  # no BOS/EOS added
+class Tokenizer(abc.ABC):
+    @abc.abstractmethod
+    def encode(self, text: str) -> list[int]:
+        """Token ids for `text`, special-token strings mapped to their ids, no BOS/EOS added."""
 
-    def decode(self, ids: list[int]) -> str: ...
+    @abc.abstractmethod
+    def decode(self, ids: list[int]) -> str:
+        """Text for `ids`, special tokens kept (used only to parse tool calls)."""
 
-    def token_id(self, token: str) -> int: ...
+    @abc.abstractmethod
+    def token_id(self, token: str) -> int:
+        """Id of a single special token; KeyError if it is not one token."""
 
 
 @dataclass(frozen=True)
@@ -72,7 +78,7 @@ class ChatFormat:
         return self.tok.decode(ids)
 
 
-class ByteTokenizer:
+class ByteTokenizer(Tokenizer):
     """Deterministic byte-level tokenizer with special tokens. For tests and dry runs only."""
 
     SPECIALS = ("<bos>", "<start_of_turn>", "<end_of_turn>", "<eos>")
@@ -107,7 +113,7 @@ class ByteTokenizer:
         return self._special[token]
 
 
-class HFTokenizer:
+class HFTokenizer(Tokenizer):
     """Adapter over a Hugging Face tokenizer (lazy import)."""
 
     def __init__(self, name_or_path: str):

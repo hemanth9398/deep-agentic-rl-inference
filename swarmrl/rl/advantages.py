@@ -46,10 +46,10 @@ def grpo_advantages(
         role_sets = [set(t.role for t in e.transitions) for e in eps_]
         roles = set().union(*role_sets) if role_sets else set()
         for role in roles:
-            pool = [r for r, rs in zip(rewards, role_sets) if role in rs] if per_role_norm else rewards
+            pool = [r for r, rs in zip(rewards, role_sets, strict=True) if role in rs] if per_role_norm else rewards
             mu = sum(pool) / len(pool)
             sd = math.sqrt(sum((r - mu) ** 2 for r in pool) / len(pool))
-            for e, r, rs in zip(eps_, rewards, role_sets):
+            for e, r, rs in zip(eps_, rewards, role_sets, strict=True):
                 if role not in rs:
                     continue
                 a = r - mu

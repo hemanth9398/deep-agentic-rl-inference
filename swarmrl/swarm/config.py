@@ -80,7 +80,7 @@ class SwarmConfig:
         blob = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def with_sampling(self, **kw: float) -> "SwarmConfig":
+    def with_sampling(self, **kw: float) -> SwarmConfig:
         from dataclasses import replace
 
         return replace(self, sampling=replace(self.sampling, **kw))
@@ -122,7 +122,9 @@ def default_swarm_config() -> SwarmConfig:
                 ("tester",),
                 turn_budget=15,
             ),
-            RoleConfig("tester", _TESTER, ("view", "bash", "run_tests", "handoff"), ("coder", "reviewer"), turn_budget=10),
+            RoleConfig(
+                "tester", _TESTER, ("view", "bash", "run_tests", "handoff"), ("coder", "reviewer"), turn_budget=10
+            ),
             RoleConfig("reviewer", _REVIEWER, ("view", "git_diff", "accept", "send_back"), (), turn_budget=6),
         ),
     )

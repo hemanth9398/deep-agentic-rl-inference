@@ -25,17 +25,21 @@ def main() -> int:
     ours = chat.start(sys_p, u1)
     ours += tok.encode(m1) + [chat.end_of_turn_id]
     ours += chat.user_turn(u2)
-    msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": u1},
-            {"role": "assistant", "content": m1}, {"role": "user", "content": u2}]
+    msgs = [
+        {"role": "system", "content": sys_p},
+        {"role": "user", "content": u1},
+        {"role": "assistant", "content": m1},
+        {"role": "user", "content": u2},
+    ]
     ref = tok.hf.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True)
     if hasattr(ref, "input_ids"):
         ref = ref["input_ids"]
     ok = list(ours) == list(ref)
     if not ok:
-        i = next((k for k, (x, y) in enumerate(zip(ours, ref)) if x != y), min(len(ours), len(ref)))
+        i = next((k for k, (x, y) in enumerate(zip(ours, ref, strict=False)) if x != y), min(len(ours), len(ref)))
         print(f"first difference at token {i}:")
-        print("  ours:", repr(tok.decode(ours[max(0, i - 8): i + 8])))
-        print("  ref: ", repr(tok.decode(ref[max(0, i - 8): i + 8])))
+        print("  ours:", repr(tok.decode(ours[max(0, i - 8) : i + 8])))
+        print("  ref: ", repr(tok.decode(ref[max(0, i - 8) : i + 8])))
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

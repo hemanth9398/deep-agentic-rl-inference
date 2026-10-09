@@ -44,15 +44,18 @@ def main() -> int:
         kept = g.output_ids[-1] == chat.end_of_turn_id
         print(f"[2] end-of-turn kept in output_ids: {kept}")
         ok &= kept
-    rescore = post(a.server.rstrip("/") + "/generate", {
-        "input_ids": prompt + g.output_ids,
-        "sampling_params": {"max_new_tokens": 1, "temperature": 1.0},
-        "return_logprob": True,
-        "logprob_start_len": len(prompt),
-    })
+    rescore = post(
+        a.server.rstrip("/") + "/generate",
+        {
+            "input_ids": prompt + g.output_ids,
+            "sampling_params": {"max_new_tokens": 1, "temperature": 1.0},
+            "return_logprob": True,
+            "logprob_start_len": len(prompt),
+        },
+    )
     inp = rescore["meta_info"]["input_token_logprobs"]
-    lp = [x[0] for x in inp if x[0] is not None][-len(g.output_ids):]
-    gap = sum(abs(x - y) for x, y in zip(lp, g.logprobs)) / max(len(lp), 1)
+    lp = [x[0] for x in inp if x[0] is not None][-len(g.output_ids) :]
+    gap = sum(abs(x - y) for x, y in zip(lp, g.logprobs, strict=False)) / max(len(lp), 1)
     print(f"[3] mean |rescored - sampled| logprob = {gap:.4f} (tol {a.tol})")
     ok &= gap <= a.tol
     print("PASS" if ok else "FAIL")

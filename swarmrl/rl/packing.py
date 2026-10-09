@@ -58,7 +58,7 @@ def pack_episode(ep: Episode, max_len: int | None = None) -> list[PackedSample]:
     for t in ep.transitions:
         by_role[t.role].append(t)
     out: list[PackedSample] = []
-    for role, ts in by_role.items():
+    for ts in by_role.values():
         cur: PackedSample | None = None
         for t in ts:
             n = len(cur.input_ids) if cur else 0

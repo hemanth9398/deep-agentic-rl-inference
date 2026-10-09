@@ -25,7 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from swarmrl.inference.client import Generation
+from swarmrl.inference.client import Generation, PolicyClient
 from swarmrl.rl.packing import pack_episode
 from swarmrl.rl.schedule import StageConfig
 from swarmrl.swarm.config import SamplingConfig
@@ -33,7 +33,7 @@ from swarmrl.swarm.runtime import EpisodeRunner
 from swarmrl.traces.schema import Episode
 
 
-class SkyRLEnginePolicy:
+class SkyRLEnginePolicy(PolicyClient):
     """PolicyClient over SkyRL's InferenceEngineInterface (token-in, token-out, with log-probs)."""
 
     def __init__(self, inference_engine_client, model: str | None = None):

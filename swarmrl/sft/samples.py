@@ -64,4 +64,4 @@ def preference_pairs(episodes: Sequence[Episode]) -> list[tuple[str, str, str]]:
         if not e.scored:
             continue
         (wins if e.resolved and e.submitted else losses)[e.task_id].append(e.episode_id)
-    return [(t, w, l) for t in wins for w, l in zip(wins[t], losses.get(t, []))]
+    return [(t, w, lose) for t in wins for w, lose in zip(wins[t], losses.get(t, []), strict=False)]

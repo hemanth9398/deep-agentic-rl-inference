@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from swarmrl.grading.protected import filter_diff
 from swarmrl.grading.pytest_runner import run_pytest
-from swarmrl.sandbox.base import SandboxFactory, apply_diff
+from swarmrl.sandbox.base import SandboxFactory
 from swarmrl.tasks.validate import ValidationRecord
 
 
@@ -37,7 +37,7 @@ class CleanRoomGrader:
         kept, dropped = filter_diff(diff, self.protected_patterns)
         sb = self.factory.create(task)
         try:
-            applied = apply_diff(sb, kept)
+            applied = sb.apply_patch(kept)
             if applied.returncode != 0:
                 return GradeResult(
                     False, 0, len(record.fail_to_pass), 0, len(record.pass_to_pass),
@@ -50,9 +50,7 @@ class CleanRoomGrader:
         f2p_ok = [t for t in record.fail_to_pass if run.outcomes.get(t, False)]
         p2p_ok = [t for t in record.pass_to_pass if run.outcomes.get(t, False)]
         failed = [t for t in record.fail_to_pass + record.pass_to_pass if not run.outcomes.get(t, False)]
-        resolved = (
-            not failed and len(f2p_ok) == len(record.fail_to_pass) and len(record.fail_to_pass) > 0
-        )
+        resolved = not failed and len(f2p_ok) == len(record.fail_to_pass) and len(record.fail_to_pass) > 0
         log = run.exec_result.output[-4000:] if run.exec_result else ""
         return GradeResult(
             resolved, len(f2p_ok), len(record.fail_to_pass), len(p2p_ok), len(record.pass_to_pass),

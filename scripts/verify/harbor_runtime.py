@@ -19,9 +19,23 @@ from swarmrl.tasks.harbor import HarborTask
 def run(image: str, task: Path, solve: bool) -> str:
     logs = Path(tempfile.mkdtemp())
     script = ("bash /solution/solve.sh && " if solve else "") + "bash /tests/test.sh; cat /logs/verifier/reward.txt"
-    cmd = ["docker", "run", "--rm", "--network", "none",
-           "-v", f"{task / 'tests'}:/tests:ro", "-v", f"{task / 'solution'}:/solution:ro", "-v", f"{logs}:/logs/verifier",
-           image, "bash", "-c", script]
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        f"{task / 'tests'}:/tests:ro",
+        "-v",
+        f"{task / 'solution'}:/solution:ro",
+        "-v",
+        f"{logs}:/logs/verifier",
+        image,
+        "bash",
+        "-c",
+        script,
+    ]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     return (p.stdout.strip().splitlines() or ["?"])[-1]
 

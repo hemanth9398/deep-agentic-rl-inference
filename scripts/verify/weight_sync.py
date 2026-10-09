@@ -41,8 +41,8 @@ def main() -> int:
     sync.before_training()
     sync.sync(a.base_checkpoint, 2)
     ids2, lp2 = probe(client, chat, prompt)
-    changed = ids1 != ids0 or max(abs(x - y) for x, y in zip(lp0, lp1)) > 1e-3
-    restored = ids2 == ids0 and max(abs(x - y) for x, y in zip(lp0, lp2)) < 1e-3
+    changed = ids1 != ids0 or max(abs(x - y) for x, y in zip(lp0, lp1, strict=False)) > 1e-3
+    restored = ids2 == ids0 and max(abs(x - y) for x, y in zip(lp0, lp2, strict=False)) < 1e-3
     print(f"update changed outputs: {changed}; base restored exactly: {restored}")
     ok = changed and restored
     print("PASS" if ok else "FAIL")

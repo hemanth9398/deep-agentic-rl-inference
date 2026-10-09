@@ -32,13 +32,16 @@ def test_filters_keep_clean_wins_only(make_runner, task, factory):
 
 def test_lucky_guess_without_tests_is_dropped(make_runner, task, factory):
     files = oracle_file_states(task, factory)
-    (path, content), = files.items()
+    ((path, content),) = files.items()
 
     def script(role, turn, ctx):
         if role == "planner":
             return call("delegate", to="coder", plan="fix")
         if role == "coder":
-            return [call("create_file", path=path, content=content, overwrite=True), call("handoff", to="tester", note="x")][turn]
+            return [
+                call("create_file", path=path, content=content, overwrite=True),
+                call("handoff", to="tester", note="x"),
+            ][turn]
         if role == "tester":
             return call("handoff", to="reviewer", note="looks fine")  # never ran tests
         return call("accept")
@@ -53,9 +56,9 @@ def test_sft_samples_mask_and_drop(make_runner, task, factory):
     ep = oracle_episode(make_runner, task, factory)
     samples, dropped = build_sft_samples([ep], max_len=10**6)
     assert len(samples) == len(ep.transitions) and dropped == 0
-    for s, t in zip(samples, ep.transitions):
+    for s, t in zip(samples, ep.transitions, strict=True):
         assert s.labels[: len(t.input_ids)] == [IGNORE] * len(t.input_ids)
-        assert s.labels[len(t.input_ids):] == t.output_ids + t.closing_ids
+        assert s.labels[len(t.input_ids) :] == t.output_ids + t.closing_ids
         assert s.labels[-1] == 258  # end-of-turn carries loss
     longest = max(len(t.input_ids) + len(t.output_ids) for t in ep.transitions)
     _, dropped = build_sft_samples([ep], max_len=longest - 1)
@@ -72,6 +75,7 @@ def test_adaptive_sampler():
         for _ in range(n):
             e = Episode("x", tid, "train", "fp", "base", 0, team_reward=float(resolved))
             from swarmrl.traces.schema import GradeSummary, Termination
+
             e.termination, e.grade = Termination.SUBMIT, GradeSummary(resolved=resolved)
             out.append(e)
         return out

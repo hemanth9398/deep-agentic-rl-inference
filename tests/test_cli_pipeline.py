@@ -93,3 +93,30 @@ def test_rejection_sample_then_rl_stage0(task, stub, tmp_path, capsys):
     assert len(rows) == 2 and rows[0]["stage"] == "0_correctness" and rows[0]["alignment_shift"] == 0
     paths = [p for p, _ in stub.calls]
     assert "/flush_cache" in paths and "/load_lora_adapter" in paths  # step 2 pushed step-1 weights
+
+
+def test_rl_with_gigpo_and_advantages_command(task, stub, tmp_path, capsys):
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("peft")
+    toml = task.task_dir / "task.toml"
+    toml.write_text(toml.read_text().replace('split = "dev"', 'split = "train"'))
+    tasks, traces = str(task.task_dir.parent), str(tmp_path / "traces")
+    serving = ["--server", stub.url, "--tokenizer", "byte", "--traces", traces]
+    model_dir = tmp_path / "tiny"
+    transformers.LlamaForCausalLM(
+        transformers.LlamaConfig(vocab_size=300, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                                 num_attention_heads=2, num_key_value_heads=2, max_position_embeddings=4096)
+    ).save_pretrained(model_dir)  # fmt: skip
+    rates = tmp_path / "rates.json"
+    rates.write_text(json.dumps({"solve_rates": {task.task_id: 0.5}, "min_turns": {task.task_id: 6}}))
+    rl_args = ["--stage", "1", "--steps", "1", "--batch-tasks", "1", "--advantage", "gigpo"]
+    run_dir = ["--output-dir", str(tmp_path / "run")]
+    code = main(["rl", tasks, "--model", str(model_dir), "--solve-rates", str(rates), *rl_args, *run_dir, *serving])
+    assert code == 0, capsys.readouterr().out
+    row = json.loads((tmp_path / "run" / "metrics.jsonl").read_text().splitlines()[0])
+    assert row["advantage_estimator"] == "gigpo" and row["gigpo/anchored_fraction"] == 1.0
+    capsys.readouterr()
+    assert main(["advantages", traces]) == 0
+    out = capsys.readouterr().out
+    assert "grpo | step | gigpo" in out and "turns (100%) got a step-level advantage" in out

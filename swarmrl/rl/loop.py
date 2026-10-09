@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -21,6 +22,7 @@ from swarmrl.inference.weight_sync import WeightSync
 from swarmrl.observability import MetricsSink
 from swarmrl.rl.advantages import grpo_advantages
 from swarmrl.rl.curriculum import Curriculum, measure_solve_rates
+from swarmrl.rl.gigpo import GiGPOConfig, gigpo_token_advantages
 from swarmrl.rl.loss import alignment_shift, entropy_from_logprobs, importance_weights, mismatch_kl
 from swarmrl.rl.packing import pack_episodes
 from swarmrl.rl.schedule import StageConfig
@@ -46,6 +48,8 @@ class RLLoop:
     version: int = 0
     history: list[dict] = field(default_factory=list)
     allowed_tasks: Sequence[str] | None = None
+    advantage_estimator: Literal["grpo", "gigpo"] = "grpo"  # gigpo: experimental, see swarmrl.rl.gigpo
+    gigpo: GiGPOConfig = field(default_factory=GiGPOConfig)
 
     def rollout(self, step: int) -> list[Episode]:
         task_ids = self.curriculum.sample(self.batch_tasks, self.allowed_tasks)
@@ -80,12 +84,20 @@ class RLLoop:
             w, em = importance_weights(o, r, m, self.stage.off_policy)
             weights.append(w)
             eff_masks.append(em)
+        extra: dict = {}
+        if self.advantage_estimator == "gigpo":
+            token_adv, gstats = gigpo_token_advantages(samples, episodes, self.gigpo)
+            extra = {f"gigpo/{k}": v for k, v in vars(gstats).items()} | {
+                "gigpo/anchored_fraction": gstats.anchored_fraction
+            }
+        else:
+            token_adv = [np.full(len(s.input_ids), s.advantage) for s in samples]
+        token_adv = [a * m for a, m in zip(token_adv, masks, strict=True)]
         # Score everything (mismatch KL needs it), but only train on samples that carry signal:
-        # a zero advantage (all-equal group) contributes no gradient, only compute.
-        keep = [i for i, s in enumerate(samples) if s.advantage != 0.0]
+        # an all-zero advantage contributes no gradient, only compute.
+        keep = [i for i, a in enumerate(token_adv) if np.any(a != 0.0)]
         pick = lambda xs: [xs[i] for i in keep]  # noqa: E731
-        advs = [np.full(len(samples[i].input_ids), samples[i].advantage) * masks[i] for i in keep]
-        upd = self.trainer.update(pick(samples), advs, pick(old), pick(weights), pick(eff_masks), self.stage)
+        upd = self.trainer.update(pick(samples), pick(token_adv), pick(old), pick(weights), pick(eff_masks), self.stage)
 
         self.version += 1
         self.checkpoint = self.trainer.save(self.version)
@@ -95,6 +107,7 @@ class RLLoop:
         metrics = {
             "step": step,
             "stage": self.stage.name,
+            "advantage_estimator": self.advantage_estimator,
             "episodes": len(episodes),
             "infra_errors": len(episodes) - len(scored),
             "reward_mean": float(np.mean([e.team_reward for e in scored])) if scored else 0.0,
@@ -111,6 +124,7 @@ class RLLoop:
             "entropy_proxy": entropy_from_logprobs(roll_all, m_all) if m_all.size else 0.0,
             "tokens_by_role": _tokens_by_role(scored),
             **{f"train/{k}": v for k, v in upd.items()},
+            **extra,
         }
         if self.eval_every and self.eval_fn and (step + 1) % self.eval_every == 0:
             metrics["eval"] = self.eval_fn(step)

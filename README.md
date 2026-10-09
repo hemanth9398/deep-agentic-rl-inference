@@ -54,6 +54,30 @@ swarmrl report traces/ --split heldout
 (it applies a deny-all NetworkPolicy; your CNI must enforce NetworkPolicy). Logs go to stderr
 (`SWARMRL_LOG_LEVEL`, `SWARMRL_LOG_JSON=1`), and RL metrics go to `<output-dir>/metrics.jsonl`.
 
+## Advantage estimators: GRPO (default) and GiGPO (experimental)
+
+Both use the same rollouts, rewards and loss; only the advantage on each token differs.
+
+| | GRPO (default) | GiGPO (`--advantage gigpo`) |
+| --- | --- | --- |
+| Unit | one number per (episode, role) | one number per turn |
+| Formula | team reward minus the group mean, per role | GRPO's number + omega x step advantage |
+| Step advantage | none | turns taken from the same state in different episodes are compared by discounted return gamma^(T-1-t) x reward |
+| All-success group | no signal | still prefers the faster path when episodes share states |
+| Runs on | `swarmrl rl` and SkyRL | `swarmrl rl` only (SkyRL computes its own GRPO) |
+
+"Same state" (`--gigpo-state-key`): `env` (default) matches the role plus the history of tool calls and
+observations, ignoring free-text reasoning and run-to-run noise such as timings; `context` matches exact
+input tokens. A/B it with the same tasks and seeds:
+
+```bash
+swarmrl rl tasks/ --stage 1 --advantage grpo  --run-name grpo  --output-dir runs/grpo  ...
+swarmrl rl tasks/ --stage 1 --advantage gigpo --run-name gigpo --output-dir runs/gigpo ...
+swarmrl advantages traces/ --group step3:<task-id>    # both estimators per turn, side by side
+```
+
+Watch `gigpo/anchored_fraction` in `metrics.jsonl`: if few turns share a state, GiGPO falls back to GRPO.
+
 ## Failure handling
 
 - An episode that hits an infrastructure problem, a wall-clock timeout (`[agent] timeout_sec`) or an
@@ -64,7 +88,7 @@ swarmrl report traces/ --split heldout
 
 ## Tests
 
-`pytest` runs 65 tests; the torch tests skip when torch is absent. CI runs lint, the core suite on
+`pytest` runs 75 tests; the torch tests skip when torch is absent. CI runs lint, the core suite on
 Python 3.11-3.13, and the torch suite on CPU. The tests cover:
 
 | Area | Exercised for real |

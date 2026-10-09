@@ -28,6 +28,9 @@ class PackedSample:
     reward: float = 0.0
     advantage: float = 0.0
     transitions: list[int] = field(default_factory=list)  # episode turn indices packed here
+    # (turn, start, end): where each packed turn's policy tokens sit in input_ids, so per-turn
+    # advantages (GiGPO's step level) can be placed on exactly that turn's tokens.
+    spans: list[tuple[int, int, int]] = field(default_factory=list)
 
     @property
     def response_ids(self) -> list[int]:
@@ -49,8 +52,9 @@ def _new(ep: Episode, t: Transition) -> PackedSample:
     ids = t.input_ids + t.output_ids + t.closing_ids
     mask = [0] * len(t.input_ids) + [1] * len(t.output_ids) + [0] * len(t.closing_ids)
     lps = [0.0] * len(t.input_ids) + list(t.rollout_logprobs) + [0.0] * len(t.closing_ids)
-    return PackedSample(ep.episode_id, ep.task_id, ep.group_id, t.role, len(t.input_ids), ids, mask, lps,
-                        transitions=[t.turn])  # fmt: skip
+    start = len(t.input_ids)
+    return PackedSample(ep.episode_id, ep.task_id, ep.group_id, t.role, start, ids, mask, lps,
+                        transitions=[t.turn], spans=[(t.turn, start, start + len(t.output_ids))])  # fmt: skip
 
 
 def pack_episode(ep: Episode, max_len: int | None = None) -> list[PackedSample]:
@@ -64,6 +68,8 @@ def pack_episode(ep: Episode, max_len: int | None = None) -> list[PackedSample]:
             n = len(cur.input_ids) if cur else 0
             if cur is not None and len(t.input_ids) >= n and t.input_ids[:n] == cur.input_ids:
                 obs = t.input_ids[n:]
+                start = n + len(obs)
+                cur.spans.append((t.turn, start, start + len(t.output_ids)))
                 cur.input_ids += obs + t.output_ids + t.closing_ids
                 cur.loss_mask += [0] * len(obs) + [1] * len(t.output_ids) + [0] * len(t.closing_ids)
                 cur.rollout_logprobs += [0.0] * len(obs) + list(t.rollout_logprobs) + [0.0] * len(t.closing_ids)

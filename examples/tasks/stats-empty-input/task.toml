@@ -1,0 +1,20 @@
+schema_version = "1.4"
+
+[metadata]
+split = "dev"
+source = "handwritten"
+repo = "stats"
+pytest_targets = ["tests/test_core.py"]
+min_turns_to_solve = 6
+
+[environment]
+workdir = "/workspace"
+allow_internet = false
+cpus = 2
+memory_mb = 4096
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1800.0

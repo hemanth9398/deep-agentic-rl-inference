@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmrl"
+version = "0.1.0"
+description = "Shared-policy agent swarm post-training: SkyRL-Agent rollouts, SGLang inference, QLoRA SFT and GRPO."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# Thin adapters import these lazily; pin them per the doc's "verify before building" list.
+sglang = ["sglang>=0.5"]
+sft = ["torch", "transformers", "trl", "peft", "bitsandbytes", "datasets"]
+rl = ["torch", "skyrl"]
+verifiers = ["verifiers"]
+
+[project.scripts]
+swarmrl = "swarmrl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["swarmrl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

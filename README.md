@@ -54,6 +54,29 @@ swarmrl report traces/ --split heldout
 (it applies a deny-all NetworkPolicy; your CNI must enforce NetworkPolicy). Logs go to stderr
 (`SWARMRL_LOG_LEVEL`, `SWARMRL_LOG_JSON=1`), and RL metrics go to `<output-dir>/metrics.jsonl`.
 
+## Kubernetes sandboxes
+
+`--sandbox k8s` runs every episode, grading and validation sandbox as its own pod. The namespace is
+created if missing, a deny-all NetworkPolicy is applied (your CNI must enforce NetworkPolicy), and pods
+get no service-account token and drop all capabilities. Pods request 0.5 CPU / 1 GiB and may burst to
+2 CPU / 4 GiB (`--pod-cpu-request`, `--pod-cpu`, ...), so idle sandboxes don't block scheduling; a pod
+that can't start within `--pod-ready-timeout` (900 s) becomes an infra error with the scheduler's reason.
+Task images must be pullable by the cluster: set `docker_image` in `task.toml`.
+
+End-to-end check on a local single-node cluster (k3s in Docker):
+
+```bash
+scripts/k8s/local_cluster.sh up
+docker build -t swarmrl-task-stats:test examples/tasks/stats-empty-input/environment
+scripts/k8s/local_cluster.sh load swarmrl-task-stats:test
+eval "$(scripts/k8s/local_cluster.sh env)"
+python scripts/k8s/e2e_pipeline.py /tmp/swarmrl-e2e --image swarmrl-task-stats:test
+```
+
+It checks network isolation from inside a sandbox pod, then runs eval, rejection sampling, SFT data and
+one RL step each with GRPO and GiGPO through the CLI (a stub server plays the model), and fails unless
+there are zero infra errors, a real optimizer step, and no pods left behind.
+
 ## Advantage estimators: GRPO (default) and GiGPO (experimental)
 
 Both use the same rollouts, rewards and loss; only the advantage on each token differs.

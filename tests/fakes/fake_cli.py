@@ -97,6 +97,8 @@ def kubectl(a):
             start(obj["metadata"]["name"], c["image"], c["workingDir"])
     elif cmd == "wait":
         sys.exit(0)
+    elif cmd == "get":  # serviceaccount readiness and pending-reason lookups
+        sys.exit(0)
     elif cmd == "exec":
         stdin = sys.stdin.buffer.read() if "-i" in a[: a.index("--")] else None
         name = a[a.index("--") - 1]

@@ -89,8 +89,12 @@ def test_kubernetes_sandbox_end_to_end(task, fake_cli):
     assert ep.resolved and ep.team_reward == 1.0
     pol = json.loads((fake_cli / "NetworkPolicy-swarmrl-sandbox-deny-all.json").read_text())
     assert pol["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert (fake_cli / "Namespace-swarm.json").exists()  # created when missing
     pods = [json.loads(p.read_text()) for p in fake_cli.glob("Pod-*.json")]
     assert pods and all(p["spec"]["automountServiceAccountToken"] is False for p in pods)
+    c = pods[0]["spec"]["containers"][0]
+    assert c["imagePullPolicy"] == "IfNotPresent"  # pre-loaded / air-gapped images work even when untagged
+    assert c["resources"]["requests"]["cpu"] == "500m" and c["resources"]["limits"]["cpu"] == "2"
     assert all(p["metadata"]["labels"] == pol["spec"]["podSelector"]["matchLabels"] for p in pods)
     assert live(fake_cli) == []
 

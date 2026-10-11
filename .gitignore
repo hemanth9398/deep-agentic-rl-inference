@@ -9,3 +9,4 @@ dist/
 /traces/
 .ruff_cache/
 /runs/
+/.k8s/

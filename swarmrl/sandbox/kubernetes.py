@@ -13,6 +13,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,13 +26,25 @@ LABEL = {"app.kubernetes.io/name": "swarmrl-sandbox"}
 
 @dataclass(frozen=True)
 class PodLimits:
+    # Limits cap what one sandbox may use; requests are what the scheduler reserves. A sandbox idles while
+    # the model generates, so reserving its full limit (requests == limits) wastes most of the node: on a
+    # 4-CPU node only one 2-CPU sandbox would fit. Requests below limits pack sandboxes densely and let
+    # them burst during test runs.
     cpu: str = "2"
     memory: str = "4Gi"
     ephemeral_storage: str = "10Gi"
+    cpu_request: str = "500m"
+    memory_request: str = "1Gi"
+    ephemeral_storage_request: str = "2Gi"
+    # IfNotPresent even for ":latest"/untagged images (Kubernetes would default those to Always),
+    # so images pre-loaded on nodes or mirrored into an air-gapped registry are used as-is.
+    image_pull_policy: str = "IfNotPresent"
 
 
 def pod_manifest(name: str, image: str, workdir: str, limits: PodLimits, namespace: str) -> dict:
-    res = {"cpu": limits.cpu, "memory": limits.memory, "ephemeral-storage": limits.ephemeral_storage}
+    lim = {"cpu": limits.cpu, "memory": limits.memory, "ephemeral-storage": limits.ephemeral_storage}
+    req = {"cpu": limits.cpu_request, "memory": limits.memory_request,
+           "ephemeral-storage": limits.ephemeral_storage_request}  # fmt: skip
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -44,14 +57,19 @@ def pod_manifest(name: str, image: str, workdir: str, limits: PodLimits, namespa
             "containers": [{
                 "name": "sandbox",
                 "image": image,
+                "imagePullPolicy": limits.image_pull_policy,
                 "command": ["sleep", "infinity"],
                 "workingDir": workdir,
                 "env": [{"name": "PYTHONDONTWRITEBYTECODE", "value": "1"}],
-                "resources": {"requests": res, "limits": res},
+                "resources": {"requests": req, "limits": lim},
                 "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
             }],
         },
     }  # fmt: skip
+
+
+def namespace_manifest(namespace: str) -> dict:
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace, "labels": dict(LABEL)}}
 
 
 def network_policy_manifest(namespace: str) -> dict:
@@ -82,11 +100,17 @@ class KubernetesSandbox(Sandbox):
             w = _cli(self.binary, "wait", "-n", namespace, "--for=condition=Ready", f"pod/{self.name}",
                      f"--timeout={ready_timeout_s}s", timeout=ready_timeout_s + 30)  # fmt: skip
             if w.returncode != 0:
-                raise InfraError(f"pod {self.name} not ready: {w.stderr.strip()}")
+                raise InfraError(f"pod {self.name} not ready after {ready_timeout_s}s: {self._why_pending()}")
             self.init_baseline()
         except BaseException:
             self.close()
             raise
+
+    def _why_pending(self) -> str:
+        """The scheduler's or kubelet's latest reason, e.g. 'Insufficient cpu' or an image pull error."""
+        r = _cli(self.binary, "get", "events", "-n", self.namespace, "--field-selector",
+                 f"involvedObject.name={self.name}", "-o", "jsonpath={.items[-1:].message}", timeout=30)  # fmt: skip
+        return r.stdout.strip() or "no events (check the pod and node)"
 
     def _run(self, cmd: str, timeout: float, input: str | None = None) -> ExecResult:
         limit = max(int(timeout), 1)
@@ -139,15 +163,26 @@ class KubernetesSandbox(Sandbox):
 
 class KubernetesSandboxFactory(SandboxFactory):
     def __init__(self, namespace: str = "swarmrl", limits: PodLimits = PodLimits(),
-                 image_for: Callable[[object], str] | None = None):  # fmt: skip
+                 image_for: Callable[[object], str] | None = None, ready_timeout_s: int = 900):  # fmt: skip
         self.namespace = namespace
         self.limits = limits
         self._image_for = image_for
+        # Long enough to wait out scheduling queues and cluster autoscaling; a pod that never becomes
+        # Ready fails the episode as an infra error with the scheduler's reason.
+        self.ready_timeout_s = ready_timeout_s
 
-    def ensure_network_policy(self) -> None:
-        r = _cli("kubectl", "apply", "-f", "-", input=json.dumps(network_policy_manifest(self.namespace)))
-        if r.returncode != 0:
-            raise InfraError(f"NetworkPolicy apply failed: {r.stderr.strip()}")
+    def ensure_network_policy(self, timeout_s: int = 60) -> None:
+        """Prepare the namespace: create it if missing, apply the deny-all NetworkPolicy, and wait for the
+        namespace's default service account (pods are rejected until the controller creates it)."""
+        for manifest in (namespace_manifest(self.namespace), network_policy_manifest(self.namespace)):
+            r = _cli("kubectl", "apply", "-f", "-", input=json.dumps(manifest))
+            if r.returncode != 0:
+                raise InfraError(f"{manifest['kind']} apply failed: {r.stderr.strip()}")
+        deadline = time.monotonic() + timeout_s
+        while _cli("kubectl", "get", "serviceaccount", "default", "-n", self.namespace, timeout=30).returncode != 0:
+            if time.monotonic() > deadline:
+                raise InfraError(f"namespace {self.namespace}: default service account never appeared")
+            time.sleep(1)
 
     def image_for(self, task) -> str:
         if self._image_for is not None:
@@ -157,4 +192,4 @@ class KubernetesSandboxFactory(SandboxFactory):
         raise InfraError(f"task {task.task_id}: no registry image; set docker_image in task.toml or pass image_for")
 
     def create(self, task) -> KubernetesSandbox:
-        return KubernetesSandbox(self.image_for(task), self.namespace, task.workdir, self.limits)
+        return KubernetesSandbox(self.image_for(task), self.namespace, task.workdir, self.limits, self.ready_timeout_s)

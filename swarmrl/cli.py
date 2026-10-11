@@ -39,9 +39,11 @@ def _factory(a):
 
         return DockerSandboxFactory()
     if kind == "k8s":
-        from swarmrl.sandbox.kubernetes import KubernetesSandboxFactory
+        from swarmrl.sandbox.kubernetes import KubernetesSandboxFactory, PodLimits
 
-        f = KubernetesSandboxFactory(namespace=a.namespace)
+        limits = PodLimits(cpu=a.pod_cpu, memory=a.pod_memory, cpu_request=a.pod_cpu_request,
+                           memory_request=a.pod_memory_request)  # fmt: skip
+        f = KubernetesSandboxFactory(namespace=a.namespace, limits=limits, ready_timeout_s=a.pod_ready_timeout)
         f.ensure_network_policy()
         return f
     from swarmrl.sandbox.local import LocalSandboxFactory
@@ -304,6 +306,11 @@ def _add_sandbox(s) -> None:
     s.add_argument("--sandbox", choices=["local", "docker", "k8s"], default="local",
                    help="local is for development only: no network or resource isolation")  # fmt: skip
     s.add_argument("--namespace", default="swarmrl", help="k8s namespace for sandbox pods")
+    s.add_argument("--pod-cpu", default="2", help="k8s sandbox CPU limit")
+    s.add_argument("--pod-memory", default="4Gi", help="k8s sandbox memory limit")
+    s.add_argument("--pod-cpu-request", default="500m", help="k8s sandbox CPU request (what the scheduler reserves)")
+    s.add_argument("--pod-memory-request", default="1Gi", help="k8s sandbox memory request")
+    s.add_argument("--pod-ready-timeout", type=int, default=900, help="seconds to wait for a sandbox pod to start")
 
 
 def _add_serving(s) -> None:

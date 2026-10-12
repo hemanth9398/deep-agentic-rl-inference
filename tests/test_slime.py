@@ -132,9 +132,10 @@ def test_budget_terminations_are_truncated():
 @pytest.mark.parametrize("idx,expect,absent", [
     (0, ["--lr 0.0", "--colocate"], ["--use-tis"]),
     (1, ["--eps-clip-high 0.28", "--calculate-per-token-loss"], ["--use-tis"]),
-    (2, ["--use-tis --tis-clip 2.0"], ["--custom-tis-function-path"]),
+    (2, ["--use-tis --tis-clip 2.0"], ["--custom-tis-function-path", "--rollout-function-path"]),
     (3, ["--custom-tis-function-path slime.backends.megatron_utils.loss.icepop_function --tis-clip-low 0.5",
-         "--tis-clip 2.0"], []),
+         "--tis-clip 2.0", "--rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async"],
+     []),
 ])  # fmt: skip
 def test_slime_args_per_stage(idx, expect, absent):
     p = plan(PRESETS["qwen3-30b-a3b"], ClusterSpec(nodes=1), TrainSpec())
@@ -157,6 +158,7 @@ def test_slime_args_disaggregated_pool():
     a = slime.slime_args(p, stage(1), hf_checkpoint="h", load="l", save="s", prompt_data="d", rollout_batch_size=8,
                          num_rollout=1, external_engines=["10.0.0.5:8000", "10.0.0.6:8000"])  # fmt: skip
     assert "--colocate" not in a and a[a.index("--update-weight-transport") + 1] == "nccl"
+    assert not any(x.startswith("--sglang-") for x in a) and "--rollout-num-gpus-per-engine" not in a
     i = a.index("--rollout-external-engine-addrs")
     assert a[i + 1 : i + 3] == ["10.0.0.5:8000", "10.0.0.6:8000"]
 

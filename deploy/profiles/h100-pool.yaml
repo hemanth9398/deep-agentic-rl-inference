@@ -1,0 +1,25 @@
+# Two 8x H100 nodes: Megatron on one, an llm-d rollout pool on the other. Rollouts go through the Envoy
+# gateway, where the EPP routes on exact KV-cache contents; weights are NCCL-broadcast over the RDMA rails.
+name: h100-pool
+gpu_product: NVIDIA-H100-80GB-HBM3
+gpus_per_node: 8
+link_type: eth
+rails:
+  - {name: rail0, pf: ens1f0np0}
+  - {name: rail1, pf: ens2f0np0}
+  - {name: rail2, pf: ens3f0np0}
+  - {name: rail3, pf: ens4f0np0}
+  - {name: rail4, pf: ens5f0np0}
+  - {name: rail5, pf: ens6f0np0}
+  - {name: rail6, pf: ens7f0np0}
+  - {name: rail7, pf: ens8f0np0}
+scheduler: kueue
+train_gpus: 8
+inference_gpus: 8
+swarmrl_image: ghcr.io/your-org/swarmrl-slime:0.1.0
+model: Qwen/Qwen3-30B-A3B
+planner_model: qwen3-30b-a3b
+stage: 3                                   # async stage: disaggregated, masked importance sampling
+train_nodes: 1
+rollout: pool
+pool_gpus: 8

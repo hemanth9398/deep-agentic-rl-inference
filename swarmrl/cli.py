@@ -15,6 +15,8 @@
   swarmrl plan --model M --nodes N [--json]         5D parallelism plan: Megatron layout + SGLang engines
   swarmrl slime-data TASKS --out tasks.jsonl        slime --prompt-data rows for the valid train tasks
   swarmrl slime-args --model M --stage S ...        slime train.py command (Megatron + SGLang, swarm rollouts)
+  swarmrl deploy --profile P --out DIR              render the k8s deployment (RDMA, Kueue/Volcano, slime, llm-d)
+  swarmrl pool-endpoints --namespace NS --selector  host:port of the Ready rollout-pool engines
 
 Sandboxes: --sandbox local (dev only, no isolation) | docker | k8s [--namespace NS].
 Logging: SWARMRL_LOG_LEVEL, SWARMRL_LOG_JSON=1.
@@ -354,6 +356,36 @@ def cmd_slime_args(a) -> int:
     return 0
 
 
+def cmd_deploy(a) -> int:
+    from swarmrl.deploy.profile import DeployProfile
+    from swarmrl.deploy.render import write
+
+    for path in write(DeployProfile.load(a.profile), a.out):
+        print(path)
+    return 0
+
+
+def cmd_pool_endpoints(a) -> int:
+    import subprocess
+
+    r = subprocess.run(["kubectl", "get", "pods", "-n", a.namespace, "-l", a.selector, "-o", "json"],
+                       capture_output=True, text=True, timeout=60)  # fmt: skip
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        return 1
+    addrs = []
+    for pod in json.loads(r.stdout)["items"]:
+        conds = {c["type"]: c["status"] for c in pod.get("status", {}).get("conditions", [])}
+        ip = pod.get("status", {}).get("podIP")
+        if ip and conds.get("Ready") == "True" and not pod["metadata"].get("deletionTimestamp"):
+            addrs.append(f"{ip}:{a.port}")
+    if len(addrs) < a.min_ready:
+        print(f"only {len(addrs)} ready engine(s), need {a.min_ready}", file=sys.stderr)
+        return 1
+    print(" ".join(sorted(addrs)))
+    return 0
+
+
 # --- argument parsing ----------------------------------------------------------------------
 
 
@@ -540,6 +572,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lr", type=float, default=1e-6)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_slime_args)
+
+    s = sub.add_parser("deploy", help="render the Kubernetes deployment for a profile")
+    s.add_argument("--profile", required=True, help="profile YAML/JSON (see deploy/profiles/)")
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_deploy)
+
+    s = sub.add_parser("pool-endpoints", help="host:port of the Ready engines behind a rollout pool")
+    s.add_argument("--namespace", required=True)
+    s.add_argument("--selector", required=True)
+    s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--min-ready", type=int, default=1)
+    s.set_defaults(fn=cmd_pool_endpoints)
 
     s = sub.add_parser("fingerprint", help="print the swarm fingerprint")
     s.add_argument("--single-agent", action="store_true")

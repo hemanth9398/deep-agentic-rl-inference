@@ -286,7 +286,8 @@ def slime_args(plan, stage: StageConfig, *, hf_checkpoint: str, load: str, save:
     else:
         a += ["--rollout-num-gpus", str(plan.rollout.engines * plan.rollout.engine_tp)]
     a += plan.megatron_args()
-    a += _sglang_flags(plan.sglang_args())
+    if not external_engines:  # external servers were launched with their own engine flags
+        a += _sglang_flags(plan.sglang_args())
     a += ["--hf-checkpoint", hf_checkpoint, "--load", load, "--ref-load", load, "--save", save,
           "--save-interval", str(save_interval),
           "--prompt-data", prompt_data, "--input-key", "prompt", "--label-key", "label", "--metadata-key", "metadata",
@@ -297,6 +298,8 @@ def slime_args(plan, stage: StageConfig, *, hf_checkpoint: str, load: str, save:
           "--calculate-per-token-loss", "--clip-grad", "1.0", "--lr", str(lr * stage.lr_scale),
           "--custom-generate-function-path", "swarmrl.integrations.slime.generate",
           "--custom-reward-post-process-path", "swarmrl.integrations.slime.reward_post_process"]  # fmt: skip
+    if stage.asynchronous:  # a background worker keeps episodes in flight across step boundaries
+        a += ["--rollout-function-path", "slime.rollout.fully_async_rollout.generate_rollout_fully_async"]
     mode = stage.off_policy.mode
     if mode in ("token_tis", "token_tis_reject"):
         a += ["--use-tis", "--tis-clip", str(stage.off_policy.tis_cap)]

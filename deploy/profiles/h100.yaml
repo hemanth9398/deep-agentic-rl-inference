@@ -1,0 +1,35 @@
+# One 8x H100 node: Megatron training and SGLang rollouts colocated on the same GPUs (weights by CUDA IPC).
+# Values marked CLUSTER come from your cluster; the rest are choices.
+name: h100-colocated
+gpu_product: NVIDIA-H100-80GB-HBM3         # CLUSTER: node label nvidia.com/gpu.product
+gpus_per_node: 8
+cpu_per_node: "160"
+memory_per_node: 1600Gi
+link_type: eth                             # RoCEv2; "ib" for InfiniBand
+rails:                                     # CLUSTER: one PF per GPU, names from `kubectl get sriovnetworknodestates -o yaml`
+  - {name: rail0, pf: ens1f0np0}
+  - {name: rail1, pf: ens2f0np0}
+  - {name: rail2, pf: ens3f0np0}
+  - {name: rail3, pf: ens4f0np0}
+  - {name: rail4, pf: ens5f0np0}
+  - {name: rail5, pf: ens6f0np0}
+  - {name: rail6, pf: ens7f0np0}
+  - {name: rail7, pf: ens8f0np0}
+roce_gid_index: 3                          # CLUSTER: `show_gids` RoCEv2 IPv4 entry
+scheduler: kueue
+topology_levels:                           # CLUSTER: node labels from coarse to fine
+  - network.topology/block
+  - network.topology/rack
+  - kubernetes.io/hostname
+train_gpus: 8
+inference_gpus: 8
+swarmrl_image: ghcr.io/your-org/swarmrl-slime:0.1.0   # built from deploy/images/Dockerfile.slime
+model: Qwen/Qwen3-30B-A3B
+planner_model: qwen3-30b-a3b
+models_pvc: models                         # RWX: /models/{hf,torch_dist,rl,tasks}
+stage: 1
+train_nodes: 1
+rollout: colocated
+seq_len: 32768
+rollout_batch_size: 32
+num_rollout: 200

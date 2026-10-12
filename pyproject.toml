@@ -11,13 +11,14 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "pyyaml>=6"]
 # Heavy dependencies are imported lazily, only by the modules that need them.
 sglang = ["sglang>=0.5"]                                    # serving (the client itself is stdlib-only)
 train = ["torch>=2.4", "transformers>=4.56", "peft>=0.13", "safetensors"]   # RL trainer, LoRA SFT, merge
 qlora = ["swarmrl[train]", "bitsandbytes>=0.43"]            # 4-bit QLoRA SFT (CUDA)
 skyrl = ["skyrl"]                                           # multi-GPU RL via SkyRL-train
 verifiers = ["verifiers"]                                   # eval path B (vf-eval)
+deploy = ["pyyaml>=6"]                                      # `swarmrl deploy` manifest rendering
 
 [project.scripts]
 swarmrl = "swarmrl.cli:main"

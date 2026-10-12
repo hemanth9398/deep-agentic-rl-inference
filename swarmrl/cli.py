@@ -12,6 +12,11 @@
   swarmrl advantages TRACES [--group G]             GRPO vs GiGPO advantages per turn, side by side
   swarmrl report TRACES [--split S]                 metrics report from the trace store
   swarmrl fingerprint [--single-agent]              print the swarm fingerprint
+  swarmrl plan --model M --nodes N [--json]         5D parallelism plan: Megatron layout + SGLang engines
+  swarmrl slime-data TASKS --out tasks.jsonl        slime --prompt-data rows for the valid train tasks
+  swarmrl slime-args --model M --stage S ...        slime train.py command (Megatron + SGLang, swarm rollouts)
+  swarmrl deploy --profile P --out DIR              render the k8s deployment (RDMA, Kueue/Volcano, slime, llm-d)
+  swarmrl pool-endpoints --namespace NS --selector  host:port of the Ready rollout-pool engines
 
 Sandboxes: --sandbox local (dev only, no isolation) | docker | k8s [--namespace NS].
 Logging: SWARMRL_LOG_LEVEL, SWARMRL_LOG_JSON=1.
@@ -299,6 +304,88 @@ def cmd_report(a) -> int:
     return 0
 
 
+def cmd_plan(a) -> int:
+    from swarmrl.parallel.planner import ClusterSpec, ModelSpec, TrainSpec, plan
+
+    m = ModelSpec.load(a.model)
+    c = ClusterSpec(nodes=a.nodes, gpus_per_node=a.gpus_per_node, gpu_mem_gib=a.gpu_mem_gib, inter_gbs=a.inter_gbs)
+    t = TrainSpec(seq_len=a.seq_len, tokens_per_microbatch=a.tokens_per_microbatch, global_tokens=a.global_tokens,
+                  precision=a.precision, recompute=a.recompute, lora_rank=a.lora_rank,
+                  optimizer_offload=a.optimizer_offload)  # fmt: skip
+    try:
+        p = plan(m, c, t, rollout_gpus=a.rollout_gpus, context=a.rollout_context, min_concurrent=a.min_concurrent,
+                 auto_fit=not a.no_auto_fit)  # fmt: skip
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(p.to_dict(), indent=1) if a.json else p.report(a.top))
+    return 0
+
+
+def cmd_slime_data(a) -> int:
+    from swarmrl.integrations.slime import prompt_rows
+    from swarmrl.rl.schedule import stage
+    from swarmrl.tasks.harbor import load_tasks
+
+    st = stage(a.stage)
+    rates = json.loads(Path(a.solve_rates).read_text())["solve_rates"] if a.solve_rates else None
+    tasks = _valid_tasks(load_tasks(a.tasks, split="train"), _validator(a.tasks, _factory(a)))
+    rows = prompt_rows(tasks, rates, st.data_lo, st.data_hi)
+    Path(a.out).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    print(json.dumps({"tasks": len(rows), "out": a.out}))
+    return 0 if rows else 1
+
+
+def cmd_slime_args(a) -> int:
+    from swarmrl.integrations.slime import launch_command, slime_args
+    from swarmrl.parallel.planner import ClusterSpec, ModelSpec, TrainSpec, plan
+    from swarmrl.rl.schedule import stage
+
+    st = stage(a.stage)
+    p = plan(ModelSpec.load(a.model), ClusterSpec(nodes=a.nodes, gpus_per_node=a.gpus_per_node),
+             TrainSpec(seq_len=a.seq_len, global_tokens=a.global_tokens), rollout_gpus=a.rollout_gpus,
+             context=a.seq_len)  # fmt: skip
+    args = slime_args(p, st, hf_checkpoint=a.hf_checkpoint, load=a.load, save=a.save, prompt_data=a.prompt_data,
+                      rollout_batch_size=a.rollout_batch_size, num_rollout=a.num_rollout,
+                      max_response_len=a.max_response_len, lr=a.lr,
+                      external_engines=a.external_engines or ())  # fmt: skip
+    if a.json:
+        print(json.dumps({"args": args, "env": p.env(), "plan": p.to_dict()}, indent=1))
+    else:
+        print(launch_command(args, p.env()))
+    return 0
+
+
+def cmd_deploy(a) -> int:
+    from swarmrl.deploy.profile import DeployProfile
+    from swarmrl.deploy.render import write
+
+    for path in write(DeployProfile.load(a.profile), a.out):
+        print(path)
+    return 0
+
+
+def cmd_pool_endpoints(a) -> int:
+    import subprocess
+
+    r = subprocess.run(["kubectl", "get", "pods", "-n", a.namespace, "-l", a.selector, "-o", "json"],
+                       capture_output=True, text=True, timeout=60)  # fmt: skip
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        return 1
+    addrs = []
+    for pod in json.loads(r.stdout)["items"]:
+        conds = {c["type"]: c["status"] for c in pod.get("status", {}).get("conditions", [])}
+        ip = pod.get("status", {}).get("podIP")
+        if ip and conds.get("Ready") == "True" and not pod["metadata"].get("deletionTimestamp"):
+            addrs.append(f"{ip}:{a.port}")
+    if len(addrs) < a.min_ready:
+        print(f"only {len(addrs)} ready engine(s), need {a.min_ready}", file=sys.stderr)
+        return 1
+    print(" ".join(sorted(addrs)))
+    return 0
+
+
 # --- argument parsing ----------------------------------------------------------------------
 
 
@@ -436,6 +523,67 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--checkpoint")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("plan", help="5D parallelism plan (TP/PP/CP/EP/DP) for Megatron + SGLang rollout engines")
+    s.add_argument("--model", required=True, help="preset (e.g. gemma3-27b, qwen3-30b-a3b), model dir or config.json")
+    s.add_argument("--nodes", type=int, default=1, help="training nodes (all GPUs when colocated)")
+    s.add_argument("--gpus-per-node", type=int, default=8)
+    s.add_argument("--gpu-mem-gib", type=float, default=80.0)
+    s.add_argument("--inter-gbs", type=float, default=50.0, help="RDMA bandwidth per GPU, GB/s (400 Gb/s NIC = 50)")
+    s.add_argument("--seq-len", type=int, default=32768, help="longest training sample in tokens")
+    s.add_argument("--tokens-per-microbatch", type=int, default=0, help="dynamic-batching budget (default seq-len)")
+    s.add_argument("--global-tokens", type=int, default=1 << 21, help="tokens per optimizer step")
+    s.add_argument("--precision", choices=["bf16", "fp8"], default="bf16")
+    s.add_argument("--recompute", choices=["selective", "full"], default="selective")
+    s.add_argument("--lora-rank", type=int, default=0, help="0 = full-parameter training")
+    s.add_argument("--optimizer-offload", action="store_true")
+    s.add_argument("--no-auto-fit", action="store_true", help="fail instead of applying memory remedies")
+    s.add_argument("--rollout-gpus", type=int, help="separate rollout GPUs (default: colocated on the training GPUs)")
+    s.add_argument("--rollout-context", type=int, default=16384, help="typical rollout context length")
+    s.add_argument("--min-concurrent", type=int, default=32, help="sequences each engine must hold in KV cache")
+    s.add_argument("--top", type=int, default=8)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_plan)
+
+    s = sub.add_parser("slime-data", help="slime --prompt-data rows (one per valid train task)")
+    s.add_argument("tasks")
+    s.add_argument("--out", required=True)
+    s.add_argument("--stage", default="1", help="stage whose solve-rate band selects tasks")
+    s.add_argument("--solve-rates", help="rates.json from rejection-sample")
+    _add_sandbox(s)
+    s.set_defaults(fn=cmd_slime_data)
+
+    s = sub.add_parser("slime-args", help="slime train.py command for a stage (Megatron + SGLang + swarm)")
+    s.add_argument("--model", required=True, help="planner preset, model dir or config.json")
+    s.add_argument("--stage", default="1")
+    s.add_argument("--nodes", type=int, default=1)
+    s.add_argument("--gpus-per-node", type=int, default=8)
+    s.add_argument("--seq-len", type=int, default=32768)
+    s.add_argument("--global-tokens", type=int, default=1 << 21)
+    s.add_argument("--rollout-gpus", type=int, help="separate rollout GPUs (default: colocated)")
+    s.add_argument("--external-engines", nargs="+", help="host:port of pre-launched SGLang servers (llm-d pool)")
+    s.add_argument("--hf-checkpoint", required=True)
+    s.add_argument("--load", required=True, help="Megatron torch_dist checkpoint")
+    s.add_argument("--save", required=True)
+    s.add_argument("--prompt-data", required=True, help="from `swarmrl slime-data`")
+    s.add_argument("--rollout-batch-size", type=int, default=32, help="tasks per RL step")
+    s.add_argument("--num-rollout", type=int, default=200, help="RL steps")
+    s.add_argument("--max-response-len", type=int, default=8192, help="tokens per model turn")
+    s.add_argument("--lr", type=float, default=1e-6)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_slime_args)
+
+    s = sub.add_parser("deploy", help="render the Kubernetes deployment for a profile")
+    s.add_argument("--profile", required=True, help="profile YAML/JSON (see deploy/profiles/)")
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_deploy)
+
+    s = sub.add_parser("pool-endpoints", help="host:port of the Ready engines behind a rollout pool")
+    s.add_argument("--namespace", required=True)
+    s.add_argument("--selector", required=True)
+    s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--min-ready", type=int, default=1)
+    s.set_defaults(fn=cmd_pool_endpoints)
 
     s = sub.add_parser("fingerprint", help="print the swarm fingerprint")
     s.add_argument("--single-agent", action="store_true")

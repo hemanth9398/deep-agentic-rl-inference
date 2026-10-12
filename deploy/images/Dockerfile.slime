@@ -1,0 +1,12 @@
+# slime (Megatron-Core 0.19 + SGLang 0.5.15) + swarmrl + kubectl. Used for the Ray head/workers and the
+# rollout-pool engines, so trainer and engines run the same SGLang (the NCCL weight-update protocol must match).
+#   docker build -f deploy/images/Dockerfile.slime -t ghcr.io/your-org/swarmrl-slime:0.1.0 .
+ARG SLIME_IMAGE=slimerl/slime:v0.4.0-cu129
+FROM ${SLIME_IMAGE}
+ARG KUBECTL_VERSION=v1.34.1
+RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+ && chmod +x /usr/local/bin/kubectl
+COPY pyproject.toml README.md /opt/swarmrl/
+COPY swarmrl /opt/swarmrl/swarmrl
+RUN pip install --no-cache-dir "/opt/swarmrl[deploy]" \
+ && python -c "import swarmrl.integrations.slime as s; s.check_hooks_importable()"

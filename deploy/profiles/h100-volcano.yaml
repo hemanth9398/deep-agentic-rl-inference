@@ -1,0 +1,13 @@
+# The colocated setup scheduled by Volcano (gang + HyperNode network topology) instead of Kueue,
+# for clusters that standardize on Volcano. Do not run Kueue on the same workloads.
+name: h100-volcano
+scheduler: volcano
+racks: [r01, r02]                          # CLUSTER: values of the rack label
+topology_levels:
+  - network.topology/block
+  - network.topology/rack
+  - kubernetes.io/hostname
+train_nodes: 2
+rollout: colocated
+model: Qwen/Qwen3-30B-A3B
+planner_model: qwen3-30b-a3b

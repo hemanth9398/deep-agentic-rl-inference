@@ -25,12 +25,14 @@ class StubSGLang:
         self.script = script
         self.tok = ByteTokenizer()
         self.calls: list[tuple[str, dict]] = []
+        self.headers: list[dict[str, str]] = []
         stub = self
 
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 stub.calls.append((self.path, body))
+                stub.headers.append(dict(self.headers))
                 resp = stub.generate(body) if self.path == "/generate" else {"success": True}
                 data = json.dumps(resp).encode()
                 self.send_response(200)

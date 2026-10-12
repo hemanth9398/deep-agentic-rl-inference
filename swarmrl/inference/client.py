@@ -54,8 +54,9 @@ class StickyRouter:
         return max(self.servers, key=score)
 
 
-def _post(url: str, payload: dict, timeout: float) -> dict:
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+def _post(url: str, payload: dict, timeout: float, headers: dict[str, str] | None = None) -> dict:
+    hdrs = {"Content-Type": "application/json", **(headers or {})}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=hdrs)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
@@ -69,11 +70,16 @@ class SGLangClient(PolicyClient):
         timeout_s: float = 600.0,
         retries: int = 3,
         lora_name: str | None = None,
+        routing_header: str | None = None,
     ):
         self.router = StickyRouter([servers] if isinstance(servers, str) else servers)
         self.timeout_s = timeout_s
         self.retries = retries
         self.lora_name = lora_name  # set by LoRA weight sync when adapters are served unmerged
+        # When `servers` is a router or gateway rather than the engines themselves, the session key is sent in
+        # this header so the router keeps a role's turns on one engine (prefix-cache hits): e.g.
+        # "X-SMG-Routing-Key" for sgl-router consistent hashing, "x-session-id" for llm-d session affinity.
+        self.routing_header = routing_header
 
     def _payload(self, input_ids, sampling: SamplingConfig, stop_ids, max_new_tokens) -> dict:
         p = {
@@ -112,7 +118,8 @@ class SGLangClient(PolicyClient):
         for attempt in range(self.retries):
             t0 = time.monotonic()
             try:
-                g = self.parse_response(_post(url, payload, self.timeout_s))
+                hdrs = {self.routing_header: session_key} if self.routing_header else None
+                g = self.parse_response(_post(url, payload, self.timeout_s, hdrs))
                 g.latency_s = time.monotonic() - t0
                 return g
             except (urllib.error.URLError, TimeoutError, ConnectionError) as e:

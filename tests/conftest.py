@@ -53,3 +53,22 @@ def make_runner(factory, record, chat):
         return EpisodeRunner(cfg, policy, chat, kw.pop("sandbox_factory", factory), grader, lambda t: record, **kw)
 
     return make
+
+
+@pytest.fixture
+def mixed_script(task, factory):
+    """Oracle play, except every other episode's coder writes a wrong fix: groups get mixed rewards."""
+    from swarmrl.tasks.oracle_agent import oracle_file_states, oracle_script
+
+    oracle = oracle_script(oracle_file_states(task, factory), default_swarm_config())
+    coder_starts = [0]
+
+    def script(role, turn, ctx):
+        reply = oracle(role, turn, ctx)
+        if role == "coder" and turn == 0:
+            coder_starts[0] += 1
+            if coder_starts[0] % 2 == 0:  # every other episode writes a wrong fix
+                reply = reply.replace("return 0.0", "return None")
+        return reply
+
+    return script

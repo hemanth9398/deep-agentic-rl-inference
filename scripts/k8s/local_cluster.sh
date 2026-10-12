@@ -52,7 +52,9 @@ up() {
 }
 
 load() {
-  docker save "$1" | docker exec -i "$NAME" ctr -n k8s.io images import --all-platforms - >/dev/null
+  # --all-platforms keeps multi-arch indexes intact; a pulled image holds only the host's platform, so retry without
+  docker save "$1" | docker exec -i "$NAME" ctr -n k8s.io images import --all-platforms - >/dev/null 2>&1 ||
+    docker save "$1" | docker exec -i "$NAME" ctr -n k8s.io images import - >/dev/null
   docker exec "$NAME" crictl images | grep -F "${1%%:*}"
 }
 

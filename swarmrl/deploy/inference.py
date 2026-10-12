@@ -24,7 +24,8 @@ BLOCK_TOKENS = 64  # SGLang --page-size / vLLM --block-size; the EPP rehashes, b
 GATEWAY_CLASS = "envoy-ai-gateway"
 
 
-def epp_config(engine: str = "sglang") -> dict:
+def epp_config(engine: str = "sglang", block_tokens: int = BLOCK_TOKENS, kv_port: int = KV_EVENTS_PORT,
+               speculative: bool = True) -> dict:  # fmt: skip
     """EndpointPickerConfig: precise prefix-cache routing from engine KV events, plus load balance."""
     parser = "sglanghttp-parser" if engine == "sglang" else "vllmhttp-parser"
     return {
@@ -37,11 +38,11 @@ def epp_config(engine: str = "sglang") -> dict:
             {"type": "token-producer"},  # estimate backend: pre-tokenized input_ids pass through as real tokens
             {"type": "endpoint-notification-source"},
             {"type": "precise-prefix-cache-producer", "parameters": {
-                "tokenProcessorConfig": {"blockSizeTokens": BLOCK_TOKENS},
-                "speculativeIndexing": True,  # count a just-routed prefix as cached before its events arrive
+                "tokenProcessorConfig": {"blockSizeTokens": block_tokens},
+                "speculativeIndexing": speculative,  # count a just-routed prefix as cached before its events arrive
                 "indexerConfig": {"kvBlockIndexConfig": {"enableMetrics": True}},
                 "kvEventsConfig": {"engineType": engine, "topicFilter": "kv@", "concurrency": 8, "discoverPods": True,
-                                   "podDiscoveryConfig": {"socketPort": KV_EVENTS_PORT}},
+                                   "podDiscoveryConfig": {"socketPort": kv_port}},
             }},
             {"type": "prefix-cache-scorer",
              "parameters": {"prefixMatchInfoProducerName": "precise-prefix-cache-producer"}},

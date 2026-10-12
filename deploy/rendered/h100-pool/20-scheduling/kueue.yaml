@@ -35,10 +35,18 @@ spec:
     withinClusterQueue: LowerPriority
   resourceGroups:
   - coveredResources:
+    - cpu
+    - memory
     - nvidia.com/gpu
     flavors:
     - name: h100
       resources:
+      - name: cpu
+        nominalQuota: '224'
+        borrowingLimit: '0'
+      - name: memory
+        nominalQuota: 1856Gi
+        borrowingLimit: 0Gi
       - name: nvidia.com/gpu
         nominalQuota: 8
         borrowingLimit: 0
@@ -59,10 +67,18 @@ spec:
       maxPriorityThreshold: 500
   resourceGroups:
   - coveredResources:
+    - cpu
+    - memory
     - nvidia.com/gpu
     flavors:
     - name: h100
       resources:
+      - name: cpu
+        nominalQuota: '224'
+        borrowingLimit: '160'
+      - name: memory
+        nominalQuota: 1856Gi
+        borrowingLimit: 1600Gi
       - name: nvidia.com/gpu
         nominalQuota: 8
         borrowingLimit: 8
@@ -79,10 +95,18 @@ spec:
     withinClusterQueue: LowerPriority
   resourceGroups:
   - coveredResources:
+    - cpu
+    - memory
     - nvidia.com/gpu
     flavors:
     - name: h100
       resources:
+      - name: cpu
+        nominalQuota: '64'
+        borrowingLimit: '320'
+      - name: memory
+        nominalQuota: 256Gi
+        borrowingLimit: 3200Gi
       - name: nvidia.com/gpu
         nominalQuota: 0
         borrowingLimit: 16

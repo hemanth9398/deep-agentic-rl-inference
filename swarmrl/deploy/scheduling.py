@@ -22,19 +22,52 @@ PRIORITIES = {"serving": 1000, "rl-train": 500, "eval": 100}
 QUEUES = {"inference": "serving", "rl": "rl-train", "eval": "eval"}  # LocalQueue -> ClusterQueue
 
 
-def _cq(name: str, gpus: int, borrow: int | None, lend: int | None, preempt: dict) -> dict:
-    gpu = {"name": "nvidia.com/gpu", "nominalQuota": gpus}
-    if borrow is not None:
-        gpu["borrowingLimit"] = borrow
-    if lend is not None:
-        gpu["lendingLimit"] = lend
+CONTROL_CPU = 64  # per queue, for pods without GPUs (Ray head, EPP, routers)
+CONTROL_MEMORY_GI = 256
+_UNITS = {"": 1, "Ki": 2**-20, "Mi": 2**-10, "Gi": 1, "Ti": 2**10}
+
+
+def _cores(q: str) -> float:
+    return float(q[:-1]) / 1000 if q.endswith("m") else float(q)
+
+
+def _gib(q: str) -> float:
+    num = q.rstrip("KMGTi")
+    return float(num) * _UNITS[q[len(num) :]]
+
+
+def _cq(p: DeployProfile, name: str, gpus: int, borrow: int | None, lend: int | None, preempt: dict) -> dict:
+    """Every resource a workload requests must be covered (Kueue rejects undeclared ones), so CPU and memory get
+    a per-GPU share of a node plus room for the CPU-only pods; VF resources are excluded in the manager config."""
+    cpu_per_gpu = _cores(p.cpu_per_node) / p.gpus_per_node
+    mem_per_gpu = _gib(p.memory_per_node) / p.gpus_per_node
+
+    def res(rname: str, nominal, borrow_, lend_) -> dict:
+        r = {"name": rname, "nominalQuota": nominal}
+        if borrow_ is not None:
+            r["borrowingLimit"] = borrow_
+        if lend_ is not None:
+            r["lendingLimit"] = lend_
+        return r
+
+    def scaled(n: int | None, per: float, extra: float, unit: str = "") -> str | None:
+        return None if n is None else f"{int(n * per + extra)}{unit}"
+
+    control = 1 if gpus or borrow else 0
+    resources = [
+        res("cpu", scaled(gpus, cpu_per_gpu, CONTROL_CPU * control), scaled(borrow, cpu_per_gpu, 0),
+            scaled(lend, cpu_per_gpu, 0)),
+        res("memory", scaled(gpus, mem_per_gpu, CONTROL_MEMORY_GI * control, "Gi"),
+            scaled(borrow, mem_per_gpu, 0, "Gi"), scaled(lend, mem_per_gpu, 0, "Gi")),
+        res("nvidia.com/gpu", gpus, borrow, lend),
+    ]  # fmt: skip
     return {
         "apiVersion": KUEUE, "kind": "ClusterQueue", "metadata": {"name": name},
         "spec": {
             "cohortName": COHORT, "namespaceSelector": {}, "queueingStrategy": "BestEffortFIFO",
             "preemption": preempt,
-            "resourceGroups": [{"coveredResources": ["nvidia.com/gpu"],
-                                "flavors": [{"name": FLAVOR, "resources": [gpu]}]}],
+            "resourceGroups": [{"coveredResources": ["cpu", "memory", "nvidia.com/gpu"],
+                                "flavors": [{"name": FLAVOR, "resources": resources}]}],
         },
     }  # fmt: skip
 
@@ -48,13 +81,13 @@ def kueue_objects(p: DeployProfile) -> list[dict]:
          "spec": {"nodeLabels": {"nvidia.com/gpu.product": p.gpu_product}, "topologyName": TOPOLOGY,
                   "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]}},
         # serving never borrows and may lend idle GPUs; it takes them back by preempting the borrower
-        _cq("serving", p.inference_gpus, borrow=0, lend=None,
+        _cq(p, "serving", p.inference_gpus, borrow=0, lend=None,
             preempt={"reclaimWithinCohort": "Any", "withinClusterQueue": "LowerPriority"}),
-        _cq("rl-train", p.train_gpus, borrow=p.inference_gpus, lend=None,
+        _cq(p, "rl-train", p.train_gpus, borrow=p.inference_gpus, lend=None,
             preempt={"reclaimWithinCohort": "Any", "withinClusterQueue": "LowerPriority",
                      "borrowWithinCohort": {"policy": "LowerPriority",
                                             "maxPriorityThreshold": PRIORITIES["rl-train"]}}),
-        _cq("eval", 0, borrow=total, lend=None, preempt={"withinClusterQueue": "LowerPriority"}),
+        _cq(p, "eval", 0, borrow=total, lend=None, preempt={"withinClusterQueue": "LowerPriority"}),
     ]  # fmt: skip
     for name, value in PRIORITIES.items():
         out.append({"apiVersion": KUEUE, "kind": "WorkloadPriorityClass", "metadata": {"name": name},

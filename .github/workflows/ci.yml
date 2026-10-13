@@ -41,4 +41,4 @@ jobs:
           python-version: "3.12"
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e '.[dev,train]'
-      - run: pytest -q tests/test_torch_trainer.py tests/test_sft_train.py tests/test_cli_pipeline.py
+      - run: pytest -q tests/test_torch_trainer.py tests/test_sft_train.py tests/test_cli_pipeline.py tests/test_v2_train.py

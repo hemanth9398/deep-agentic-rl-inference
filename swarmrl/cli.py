@@ -16,6 +16,8 @@
   swarmrl slime-data TASKS --out tasks.jsonl        slime --prompt-data rows for the valid train tasks
   swarmrl slime-args --model M --stage S ...        slime train.py command (Megatron + SGLang, swarm rollouts)
   swarmrl deploy --profile P --out DIR              render the k8s deployment (RDMA, Kueue/Volcano, slime, llm-d)
+  swarmrl v2-rl TASKS --planner-server ... ...      v2: planner / router / coder, one model + LoRA per role
+  swarmrl v2-sim                                    v2 learning dynamics: shadows + IPS vs a hard router gate
   swarmrl pool-endpoints --namespace NS --selector  host:port of the Ready rollout-pool engines
 
 Sandboxes: --sandbox local (dev only, no isolation) | docker | k8s [--namespace NS].
@@ -386,6 +388,84 @@ def cmd_pool_endpoints(a) -> int:
     return 0
 
 
+ROLES = ("planner", "coder", "router")
+
+
+def cmd_v2_rl(a) -> int:
+    from swarmrl.grading.grader import CleanRoomGrader
+    from swarmrl.inference.chat import ByteTokenizer, ChatFormat, HFTokenizer
+    from swarmrl.inference.client import SGLangClient
+    from swarmrl.inference.weight_sync import DiskWeightSync, SGLangAdmin
+    from swarmrl.observability import MetricsSink
+    from swarmrl.rl.schedule import stage
+    from swarmrl.rl.trainer import TorchPolicyTrainer, TorchTrainerConfig
+    from swarmrl.tasks.harbor import load_tasks
+    from swarmrl.v2.loop import TriLoop
+    from swarmrl.v2.router import Gate, GateConfig
+    from swarmrl.v2.runtime import RoleModel, TriConfig, TriRunner
+    from swarmrl.v2.train import VerifierTrainer
+
+    st = stage(a.stage)
+    f = _factory(a)
+    v = _validator(a.tasks, f)
+    tasks = _valid_tasks(load_tasks(a.tasks, "train"), v)
+    if not tasks:
+        print("no valid train tasks")
+        return 1
+    roles, trainers, syncs = {}, {}, {}
+    for role in ROLES:
+        servers, tok = getattr(a, f"{role}_server"), getattr(a, f"{role}_tokenizer")
+        client = SGLangClient(servers)
+        chat = ChatFormat(ByteTokenizer() if tok == "byte" else HFTokenizer(tok))
+        roles[role] = RoleModel(client, chat, getattr(a, f"{role}_max_tokens"))
+        cls = VerifierTrainer if role == "router" else TorchPolicyTrainer
+        trainers[role] = cls(
+            TorchTrainerConfig(
+                getattr(a, f"{role}_model"),
+                str(Path(a.output_dir) / role),
+                lora_rank=a.lora_rank,
+                learning_rate=a.lr,
+                save_mode=a.sync_mode,
+            )
+        )
+        syncs[role] = DiskWeightSync(SGLangAdmin(servers), a.sync_mode, client, colocated=a.colocated)
+    gate_cfg = GateConfig(cost_false_accept=a.cost_false_accept, cost_false_reject=a.cost_false_reject,
+                          epsilon=a.epsilon)  # fmt: skip
+    cfg = TriConfig(plans_per_round=a.plans, max_rounds=a.rounds, patches_per_plan=a.patches, gate=gate_cfg)
+    grader = CleanRoomGrader(f, _swarm(False).protected_paths)
+    runner = TriRunner(roles["planner"], roles["coder"], roles["router"], f, grader, v.validate, cfg, Gate(gate_cfg))
+    sink = MetricsSink(str(Path(a.output_dir) / "metrics.jsonl"))
+    loop = TriLoop(
+        runner,
+        tasks[: a.batch_tasks],
+        trainers["planner"],
+        trainers["coder"],
+        trainers["router"],
+        st,
+        group_size=a.group_size,
+        router_lr_scale=a.router_lr_scale,
+        syncs=syncs,
+        on_metrics=sink.log,
+    )
+    for i in range(a.steps):
+        m = loop.step(i)
+        print(json.dumps({k: m[k] for k in ("step", "resolve_rate", "router/false_reject_rate", "shadows")}))
+    return 0
+
+
+def cmd_v2_sim(a) -> int:
+    from swarmrl.v2.sim import SimConfig, run, summary
+
+    out = {}
+    for explore in (True, False):
+        rows = [summary(run(SimConfig(explore=explore, steps=a.steps, seed=s))) for s in range(a.seeds)]
+        out["v2 (shadows + IPS)" if explore else "hard router gate"] = {
+            k: round(sum(r[k] for r in rows) / len(rows), 3) for k in rows[0]
+        }
+    print(json.dumps(out, indent=1))
+    return 0
+
+
 # --- argument parsing ----------------------------------------------------------------------
 
 
@@ -584,6 +664,37 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--min-ready", type=int, default=1)
     s.set_defaults(fn=cmd_pool_endpoints)
+
+    s = sub.add_parser("v2-rl", help="v2 RL: large planner, small coder, small router; one model and LoRA per role")
+    s.add_argument("tasks")
+    for role, tokens in (("planner", 1024), ("coder", 8192), ("router", 128)):
+        s.add_argument(f"--{role}-server", nargs="+", required=True, help=f"SGLang URL(s) serving the {role}")
+        s.add_argument(f"--{role}-tokenizer", required=True, help="HF tokenizer of that model ('byte' for dry runs)")
+        s.add_argument(f"--{role}-model", required=True, help="base model the trainer loads (LoRA on top)")
+        s.add_argument(f"--{role}-max-tokens", type=int, default=tokens)
+    s.add_argument("--stage", default="1")
+    s.add_argument("--steps", type=int, default=100)
+    s.add_argument("--batch-tasks", type=int, default=8)
+    s.add_argument("--group-size", type=int, default=4, help="episodes per task per step")
+    s.add_argument("--plans", type=int, default=4, help="plans per round (K)")
+    s.add_argument("--patches", type=int, default=4, help="patches per executed plan (M)")
+    s.add_argument("--rounds", type=int, default=2, help="planning rounds before the best plan is forced")
+    s.add_argument("--epsilon", type=float, default=0.1, help="floor on any plan's execution probability")
+    s.add_argument("--cost-false-accept", type=float, default=1.0)
+    s.add_argument("--cost-false-reject", type=float, default=3.0)
+    s.add_argument("--lr", type=float, default=1e-6)
+    s.add_argument("--router-lr-scale", type=float, default=3.0, help="the value model learns faster (two timescales)")
+    s.add_argument("--lora-rank", type=int, default=32)
+    s.add_argument("--sync-mode", choices=["merged", "adapter"], default="adapter")
+    s.add_argument("--colocated", action="store_true")
+    s.add_argument("--output-dir", default="runs/v2")
+    _add_sandbox(s)
+    s.set_defaults(fn=cmd_v2_rl)
+
+    s = sub.add_parser("v2-sim", help="simulate v2 learning dynamics against a hard router gate")
+    s.add_argument("--steps", type=int, default=150)
+    s.add_argument("--seeds", type=int, default=3)
+    s.set_defaults(fn=cmd_v2_sim)
 
     s = sub.add_parser("fingerprint", help="print the swarm fingerprint")
     s.add_argument("--single-agent", action="store_true")

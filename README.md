@@ -25,6 +25,7 @@ as the `swarmrl` package.
 | Parallelism | 5D planner (TP, PP, CP, EP/ETP, DP): Megatron layout, memory/time model, SGLang engine sizing | `swarmrl/parallel/planner.py` |
 | Deployment | RDMA rails (SR-IOV + Multus), Kueue or Volcano, slime RayJob, llm-d pool + EPP, Envoy, KServe | `swarmrl/deploy/`, `deploy/` |
 | Lifecycle | 8 stages, 7 gates, deployment choice | `swarmrl/lifecycle/gates.py` |
+| v2 (planner / router / coder) | one model + LoRA per role, probes, cost-optimal gate with shadow exploration, per-role losses | `swarmrl/v2/`, [`docs/v2_tri_agent.md`](docs/v2_tri_agent.md) |
 
 Every extension point is an abstract base class with working implementations, enforced by
 `tests/test_interfaces.py`: `Sandbox`/`SandboxFactory`, `Tokenizer`, `PolicyClient`, `WeightSync`
@@ -202,6 +203,20 @@ from source or unavailable): Megatron/SGLang on GPUs, NCCL bandwidth on the rail
 creating VFs, KubeRay running the job, Envoy AI Gateway and the KServe controller, and Volcano at runtime.
 Run `scripts/verify/*` and a stage-0 job on the target cluster first.
 
+## v2: large planner, small router, small coder
+
+[`docs/v2_tri_agent.md`](docs/v2_tri_agent.md) has the full design and math.
+- **Planner (large model):** proposes plans, each with a sandbox probe that tests the idea without writing the fix.
+- **Router (small model):** estimates `P(solved | plan, evidence)` and gates plans with a cost-optimal threshold.
+  It still runs some plans it rejected ("shadows") with known probability.
+- **Coder (small model):** writes patches for each executed plan; the router ranks them.
+- **Grading:** every executed patch is graded on the hidden tests, and each role trains its own LoRA on those
+  outcomes: an IPS-corrected GRPO for the planner, plan-conditioned GRPO for the coder, and calibration plus
+  ranking for the router.
+- **Rejected ideas still teach:** their shadows give them a real value, so the planner is credited and the router
+  is corrected. `swarmrl v2-sim` shows the planner recovering the best idea (0.98 vs 0.19 with a hard router
+  gate) while the router becomes calibrated.
+
 ## Failure handling
 
 - An episode that hits an infrastructure problem, a wall-clock timeout (`[agent] timeout_sec`) or an
@@ -212,7 +227,7 @@ Run `scripts/verify/*` and a stage-0 job on the target cluster first.
 
 ## Tests
 
-`pytest` runs 129 tests (one more with `SLIME_SRC` set); the torch tests skip when torch is absent. CI runs lint, the core suite on
+`pytest` runs 145 tests (one more with `SLIME_SRC` set); the torch tests skip when torch is absent. CI runs lint, the core suite on
 Python 3.11-3.13, and the torch suite on CPU. The tests cover:
 
 | Area | Exercised for real |
